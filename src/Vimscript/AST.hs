@@ -54,6 +54,8 @@ data BinOp
   | GT
   | GTE
   | Concat
+  | And
+  | Or
   deriving (Eq, Show, Data, Typeable)
 
 data Primitive
@@ -72,6 +74,12 @@ data Projection
              Expr -- [expr1:expr2]
   deriving (Eq, Show, Data, Typeable)
 
+andExpr :: Expr -> Expr -> Expr
+andExpr = BinOpApply And
+
+orExpr :: Expr -> Expr -> Expr
+orExpr = BinOpApply Or
+
 data Expr
   = BinOpApply BinOp
                Expr
@@ -86,8 +94,8 @@ data Expr
   | Lambda [Name] Expr
   deriving (Eq, Show, Data, Typeable)
 
-intExpr :: Integral n => n -> Expr
-intExpr = Prim . Integer . fromIntegral
+intExpr :: Integer -> Expr
+intExpr = Prim . Integer
 
 floatingExpr :: Double -> Expr
 floatingExpr = Prim . Floating
@@ -146,6 +154,7 @@ data Stmt
            Expr
   | BuiltInStmt Name
                 Expr
+  | ExprStmt Expr
   deriving (Eq, Show, Data, Typeable)
 
 pattern LocalLet :: Name -> Expr -> Stmt

@@ -45,6 +45,8 @@ renderBinOp =
     GT -> ">"
     GTE -> ">="
     Concat -> "."
+    Or -> "||"
+    And -> "&&"
 
 commaSepIn :: Doc -> Doc -> [Doc] -> Doc
 commaSepIn l r = enclose l r . folddoc (<>) . punctuate comma
@@ -130,6 +132,7 @@ renderStmt =
       "let" <+> renderAssignTarget tgt <+> "=" <+> renderExpr expr
     BuiltInStmt name expr -> renderName name <+> parens (renderExpr expr)
     LineComment contents -> "\"" <+> strictText contents
+    ExprStmt expr -> renderExpr expr
 
 renderBlock :: Block -> Doc
 renderBlock = stack . map renderStmt

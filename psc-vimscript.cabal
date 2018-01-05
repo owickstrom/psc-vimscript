@@ -29,6 +29,7 @@ library
                      , text
                      , uniplate
   default-language:    Haskell2010
+  ghc-options:         -Wall
 
 executable psc-vimscript
   hs-source-dirs:      app

@@ -9,11 +9,14 @@ data Array a = Nil | Cons a (Array a)
 
 -- | Returns the length of an `Array`.
 arrayLength :: forall a. Array a -> Int
-arrayLength = go 0
-  where
-    go n Nil = n
-    go n (Cons x xs) = go (addInt n 1) xs
+arrayLength Nil = 0
+arrayLength (Cons x xs) = arrayLength xs `addInt` 1
 
 -- | Example array.
 l :: Array Int
 l = Cons 1 (Cons 2 (Cons 3 Nil))
+
+fst3 :: forall a b c. a -> b -> c -> a
+fst3 a b c =
+  case a of
+    x -> x
