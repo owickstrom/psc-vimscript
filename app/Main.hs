@@ -9,7 +9,6 @@ import           Lib
 import           System.Directory
 import           System.Environment
 import           System.FilePath
-import           System.IO
 import Vimscript.Render
 import           Text.PrettyPrint.Mainland  (pretty)
 
@@ -23,8 +22,8 @@ main :: IO ()
 main = do
   files <- getArgs
   modules <- mapM loadModule files
-  forM_ modules $ \(version, mod) -> do
-    let out = moduleOutPath "vim-output" (moduleName mod)
-        prg = genModule (version, mod)
+  forM_ modules $ \(version, m) -> do
+    let out = moduleOutPath "vim-output" (moduleName m)
+        prg = genModule (version, m)
     createDirectoryIfMissing True (takeDirectory out)
     writeFile out (pretty 200 (renderProgram prg))

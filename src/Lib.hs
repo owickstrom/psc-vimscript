@@ -1,4 +1,6 @@
 {-# LANGUAGE DataKinds         #-}
+{-# LANGUAGE GADTs             #-}
+{-# LANGUAGE KindSignatures    #-}
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
@@ -15,7 +17,8 @@ import           Data.Aeson.Types                    (parse)
 import           Data.Bool
 import qualified Data.ByteString.Lazy                as BS
 import           Data.Foldable
-import           Data.Generics.Uniplate.Data
+
+-- import           Data.Generics.Uniplate.Data
 import           Data.HashMap.Strict                 (HashMap)
 import qualified Data.HashMap.Strict                 as HashMap
 import           Data.List                           (intersperse)
@@ -65,20 +68,38 @@ fresh = do
 freshLocal :: Gen Vim.ScopedName
 freshLocal = Vim.ScopedName Vim.Local <$> fresh
 
-data Target
-  = Return
-  | Assign Vim.ScopedName
-  | Value
+data TargetType
+  = Statement
+  | Expression
 
-singleExpr :: Vim.Expr -> Gen (Vim.Block, Vim.Expr)
-singleExpr expr = pure ([], expr)
+data Target (t :: TargetType) where
+  GenBlock :: Vim.Block -> Target 'Statement
+  GenReturn :: Vim.Block -> Vim.Expr -> Target 'Statement
+  GenAssign :: Vim.ScopedName -> Vim.Block -> Vim.Expr -> Target 'Statement
+  GenExpression :: Vim.Block -> Vim.Expr -> Target 'Expression
 
-genTarget :: Target -> Vim.Expr -> Gen Vim.Block
-genTarget t expr =
-  case t of
-    Return      -> pure [Vim.Return expr]
-    Assign name -> pure [Vim.Let name expr]
-    Value       -> pure [Vim.ExprStmt expr]
+returnTarget :: Vim.Block -> Vim.Expr -> Gen (Target 'Statement)
+returnTarget block expr = pure (GenReturn block expr)
+
+assignTarget ::
+     Vim.ScopedName -> Vim.Block -> Vim.Expr -> Gen (Target 'Statement)
+assignTarget name block expr = pure (GenAssign name block expr)
+
+expressionTarget :: Vim.Block -> Vim.Expr -> Gen (Target 'Expression)
+expressionTarget block expr = pure (GenExpression block expr)
+
+type TargetRet (t :: TargetType) = Vim.Block -> Vim.Expr -> Gen (Target t)
+
+targetToBlock :: Target t -> Vim.Block
+targetToBlock =
+  \case
+    GenBlock block -> block
+    GenReturn block expr -> block ++ [Vim.Return expr]
+    GenAssign name block expr -> block ++ [Vim.Let name expr]
+    GenExpression block _ -> block
+
+targetToExpression :: Target 'Expression -> Vim.Expr
+targetToExpression (GenExpression _ expr) = expr
 
 identToName :: Ident -> Vim.Name
 identToName = Vim.Name . runIdent
@@ -88,7 +109,7 @@ genName (Qualified Nothing ident) = do
   mappings <- ask
   case HashMap.lookup (identToName ident) mappings of
     Just sn -> pure sn
-    Nothing -> pure (Vim.ScopedName Vim.Script (identToName ident))
+    Nothing -> error ("Unknown name: " <> show (identToName ident)) -- pure (Vim.ScopedName Vim.Global (identToName ident))
 genName (Qualified (Just (ModuleName properNames)) ident) =
   pure
     (Vim.ScopedName Vim.Global (Vim.Name (moduleName <> "#" <> runIdent ident)))
@@ -111,85 +132,102 @@ getConstructorFields (Qualified _mn tn) (Qualified _ cn) =
     Just fields -> pure fields
     Nothing -> error ("Unknown constructor: " ++ show (tn, cn))
 
-genLiteral :: Literal (Expr Ann) -> Gen (Vim.Block, Vim.Expr)
-genLiteral =
+genLiteral :: TargetRet t -> Literal (Expr Ann) -> Gen (Target t)
+genLiteral ret =
   \case
-    NumericLiteral (Left i) -> singleExpr (Vim.intExpr i)
-    NumericLiteral (Right d) -> singleExpr (Vim.floatingExpr d)
+    NumericLiteral (Left i) -> ret [] (Vim.intExpr i)
+    NumericLiteral (Right d) -> ret [] (Vim.floatingExpr d)
     StringLiteral s ->
       case decodeString s of
-        Just t  -> singleExpr (Vim.stringExpr t)
+        Just t  -> ret [] (Vim.stringExpr t)
         Nothing -> error ("Invalid string literal: " ++ show s)
-    CharLiteral c -> singleExpr (Vim.stringExpr (T.pack [c]))
-    BooleanLiteral b -> singleExpr (Vim.intExpr (bool 1 0 b))
+    CharLiteral c -> ret [] (Vim.stringExpr (T.pack [c]))
+    BooleanLiteral b -> ret [] (Vim.intExpr (bool 1 0 b))
     ArrayLiteral exprs -> do
-      es <- mapM genExpr exprs
-      pure (concatMap fst es, Vim.listExpr (map snd es))
+      targets <- mapM (genExpr expressionTarget) exprs
+      ret
+        (concatMap targetToBlock targets)
+        (Vim.listExpr (map targetToExpression targets))
     ObjectLiteral pairs -> do
-      ps <- mapM genPair pairs
-      pure (concatMap fst ps, Vim.dictionaryExpr (map snd ps))
-      where genPair (field, expr) = do
+      fs <- mapM genField pairs
+      ret
+        (concat [b | (_, b, _) <- fs])
+        (Vim.dictionaryExpr [(n, e) | (n, _, e) <- fs])
+      where genField (field, expr) = do
               n <- Vim.Name <$> psStringToText field
-              (decls, expr') <- genExpr expr
-              pure (decls, (n, expr'))
+              e <- genExpr expressionTarget expr
+              pure (n, targetToBlock e, targetToExpression e)
 
 data CaseBranch = CaseBranch
-  { branchConditions :: [Vim.Expr]
-  , branchStmts      :: Vim.Block
+  { branchConditions   :: [Vim.Expr]
+  , branchStmts        :: Vim.Block
+  , branchNameMappings :: NameMappings
   } deriving (Show, Eq)
 
 instance Monoid CaseBranch where
-  mempty = CaseBranch mempty mempty
+  mempty = CaseBranch mempty mempty mempty
   mappend b1 b2 =
     CaseBranch
       (branchConditions b1 `mappend` branchConditions b2)
       (branchStmts b1 `mappend` branchStmts b2)
+      (branchNameMappings b1 `mappend` branchNameMappings b2)
 
 genGuardedBlock ::
-     Target -> Either [(Guard Ann, Expr Ann)] (Expr Ann) -> Gen Vim.Block
-genGuardedBlock tgt =
-  \case
-    Left guardedExprs -> concat <$> mapM guardBlock guardedExprs
-    Right expr -> do
-      e <- genExpr expr
-      block <- genTarget tgt (snd e)
-      pure (fst e ++ block)
+     TargetRet 'Statement
+  -> NameMappings
+  -> Either [(Guard Ann, Expr Ann)] (Expr Ann)
+  -> Gen (Target 'Statement)
+genGuardedBlock ret nameMappings guardedExprs =
+  local (HashMap.union nameMappings) $
+  case guardedExprs of
+    Left exprs -> do
+      bs <- mapM guardBlock exprs
+      pure (GenBlock (concatMap targetToBlock bs))
+    Right expr -> GenBlock . targetToBlock <$> genExpr ret expr
   where
+    guardBlock :: (Guard Ann, Expr Ann) -> Gen (Target 'Statement)
     guardBlock (guard', expr) = do
-      g <- genExpr guard'
-      e <- genExpr expr
-      exprBlock <- genTarget tgt (snd e)
+      g <- genExpr expressionTarget guard'
+      e <- genExpr ret expr
       let cond =
             Vim.Cond
               (Vim.CondStmt
-                 (Vim.CondCase (snd g) (fst e ++ exprBlock))
+                 (Vim.CondCase (targetToExpression g) (targetToBlock e))
                  []
                  Nothing)
-      pure (fst g ++ [cond])
+      pure (GenBlock (targetToBlock g <> [cond]))
 
-branchToBlock :: CaseBranch -> Vim.Block -> Vim.Block
+branchToBlock :: CaseBranch -> Target 'Statement -> Vim.Block
 branchToBlock CaseBranch {..} block =
   case branchConditions of
-    [] -> branchStmts ++ block
+    [] -> branchStmts ++ targetToBlock block
     (x:xs) ->
       [ Vim.Cond
           (Vim.CondStmt
-             (Vim.CondCase (foldl' Vim.andExpr x xs) (branchStmts ++ block))
+             (Vim.CondCase
+                (foldl' Vim.andExpr x xs)
+                (branchStmts ++ targetToBlock block))
              []
              Nothing)
       ]
 
 genCaseAlternatives ::
-     Target -> [Vim.Expr] -> [CaseAlternative Ann] -> Gen Vim.Block
-genCaseAlternatives tgt exprs alts = do
-  branches <- mapM (genAlt tgt exprs) alts
-  guardedBlocks <- mapM (genGuardedBlock tgt . caseAlternativeResult) alts
-  let branches' = zipWith branchToBlock branches guardedBlocks
-  pure (concat branches')
+     TargetRet 'Statement
+  -> [Vim.Expr]
+  -> [CaseAlternative Ann]
+  -> Gen (Target 'Statement)
+genCaseAlternatives ret exprs alts = do
+  branches <- mapM (genAlt ret exprs) alts
+  guardedBlocks <-
+    zipWithM
+      (genGuardedBlock ret)
+      (map branchNameMappings branches)
+      (map caseAlternativeResult alts)
+  pure (GenBlock (concat (zipWith branchToBlock branches guardedBlocks)))
 
-genAlt :: Target -> [Vim.Expr] -> CaseAlternative Ann -> Gen CaseBranch
-genAlt tgt exprs alt =
-  fold <$> zipWithM (genBinder tgt) exprs (caseAlternativeBinders alt)
+genAlt :: TargetRet t -> [Vim.Expr] -> CaseAlternative Ann -> Gen CaseBranch
+genAlt ret exprs alt =
+  fold <$> zipWithM (genBinder ret) exprs (caseAlternativeBinders alt)
 
 ctorTest ::
      Qualified (ProperName 'TypeName)
@@ -206,36 +244,43 @@ ctorTest (Qualified _ typeName) (Qualified _ ctorName) expr =
         (Vim.Proj expr (Vim.ProjSingle (Vim.stringExpr f)))
         (Vim.stringExpr n)
 
-genBinder :: Target -> Vim.Expr -> Binder a -> Gen CaseBranch
-genBinder tgt expr =
+genBinder :: TargetRet t -> Vim.Expr -> Binder a -> Gen CaseBranch
+genBinder ret expr =
   \case
     NullBinder _ -> pure mempty
     LiteralBinder _ _lit -> pure mempty
     VarBinder _ ident ->
-      pure
-        mempty
-        { branchStmts =
-            [Vim.Let (Vim.ScopedName Vim.Local (identToName ident)) expr]
-        }
+      let name = identToName ident
+          sn = Vim.ScopedName Vim.Local name
+      in pure
+           mempty
+           { branchStmts = [Vim.Let sn expr]
+           , branchNameMappings = HashMap.singleton name sn
+           }
     ConstructorBinder _ typeName ctorName binders -> do
       fields <- getConstructorFields typeName ctorName
       let test = ctorTest typeName ctorName expr
-      branch <- fold <$> zipWithM (genFieldBinder tgt expr) fields binders
+      branch <- fold <$> zipWithM (genFieldBinder ret expr) fields binders
       pure branch {branchConditions = test : branchConditions branch}
     NamedBinder _ ident binder -> do
-      let n = Vim.ScopedName Vim.Local (identToName ident)
-      branch <- genBinder tgt expr binder
-      pure branch {branchStmts = Vim.Let n expr : branchStmts branch}
+      let n = identToName ident
+          sn = Vim.ScopedName Vim.Local n
+      branch <- genBinder ret expr binder
+      pure
+        branch
+        { branchStmts = Vim.Let sn expr : branchStmts branch
+        , branchNameMappings = HashMap.insert n sn (branchNameMappings branch)
+        }
 
-genFieldBinder :: Target -> Vim.Expr -> Ident -> Binder a -> Gen CaseBranch
+genFieldBinder :: TargetRet t -> Vim.Expr -> Ident -> Binder a -> Gen CaseBranch
 genFieldBinder tgt dict field binder = do
   let proj = Vim.Proj dict (Vim.ProjSingle (Vim.stringExpr (runIdent field)))
   genBinder tgt proj binder
 
-genExpr :: Expr Ann -> Gen (Vim.Block, Vim.Expr)
-genExpr =
+genExpr :: TargetRet t -> Expr Ann -> Gen (Target t)
+genExpr ret =
   \case
-    Literal _ lit -> genLiteral lit
+    Literal _ lit -> genLiteral ret lit
     Constructor _ typeName ctorName fieldNames -> do
       let typeField =
             (Vim.Name "_type", Vim.stringExpr (runProperName typeName))
@@ -245,50 +290,61 @@ genExpr =
           dictFields =
             map (\n -> (n, Vim.Ref (Vim.ScopedName Vim.Unscoped n))) names
           dict = Vim.dictionaryExpr ([typeField, ctorField] ++ dictFields)
-      pure ([], foldr (\n -> Vim.Lambda [n]) dict names)
+      ret [] (foldr (\n -> Vim.Lambda [n]) dict names)
     Accessor _ field expr -> do
-      (decls, e) <- genExpr expr
+      exprTarget <- genExpr expressionTarget expr
       t <- psStringToText field
-      pure (decls, Vim.Proj e (Vim.ProjSingle (Vim.stringExpr t)))
+      ret
+        (targetToBlock exprTarget)
+        (Vim.Proj
+           (targetToExpression exprTarget)
+           (Vim.ProjSingle (Vim.stringExpr t)))
     Abs _ arg expr -> do
       let argName = identToName arg
-      (decls, e) <-
+      closureName <- freshLocal
+      body <-
         local
           (HashMap.insert argName (Vim.ScopedName Vim.Unscoped argName))
-          (genExpr expr)
-      pure (decls, Vim.Lambda [argName] e)
+          (genExpr returnTarget expr)
+      ret
+        [Vim.Function closureName [argName] Vim.Closure (targetToBlock body)]
+        (Vim.FuncRef closureName)
     App _ f p -> do
-      (fd, f') <- genExpr f
-      (pd, p') <- genExpr p
-      pure (fd ++ pd, Vim.Apply f' [p'])
+      f' <- genExpr expressionTarget f
+      p' <- genExpr expressionTarget p
+      ret
+        (targetToBlock f' <> targetToBlock p')
+        (Vim.Apply (targetToExpression f') [targetToExpression p'])
     Var _ qn -> do
       n <- genName qn
-      pure ([], Vim.Ref n)
+      ret [] (Vim.Ref n)
     Case _ exprs alts -> do
       n <- freshLocal
-      es <- mapM genExpr exprs
-      stmts <- genCaseAlternatives (Assign n) (map snd es) alts
-      -- TODO: Use target
-      pure (concatMap fst es ++ stmts, Vim.Ref n)
+      es <- mapM (genExpr expressionTarget) exprs
+      cases <-
+        genCaseAlternatives (assignTarget n) (map targetToExpression es) alts
+      ret (concatMap targetToBlock es <> targetToBlock cases) (Vim.Ref n)
     Let _ bindings expr -> do
       binds <- mapM genBind bindings
       let mappings = foldMap fst binds
-      (decls, e) <- local (HashMap.union mappings) (genExpr expr)
-      pure (foldMap snd binds ++ decls, e)
+      e <- local (HashMap.union mappings) (genExpr expressionTarget expr)
+      ret
+        (foldMap (targetToBlock . snd) binds <> targetToBlock e)
+        (targetToExpression e)
 
-genBind :: Bind Ann -> Gen (NameMappings, Vim.Block)
+genBind :: Bind Ann -> Gen (NameMappings, Target 'Statement)
 genBind =
   \case
     NonRec ann ident expr -> genBind' ann ident expr
     Rec binds -> do
       bs <- mapM (\((ann, ident), expr) -> genBind' ann ident expr) binds
-      pure (foldMap fst bs, foldMap snd bs)
+      pure (foldMap fst bs, GenBlock (foldMap (targetToBlock . snd) bs))
   where
     genBind' _ ident expr = do
       let name = identToName ident
-          sn = Vim.ScopedName Vim.Script name
-      (decls, e) <- genExpr expr
-      pure (HashMap.singleton name sn, decls ++ [Vim.Let sn e])
+          sn = Vim.ScopedName Vim.Local name
+      e <- genExpr (assignTarget sn) expr
+      pure (HashMap.singleton name sn, GenBlock (targetToBlock e))
 
 genComment :: Comment -> Gen Vim.Block
 genComment =
@@ -306,31 +362,22 @@ genDecl moduleName =
     genDecl' _ ident (Abs _ arg expr) = do
       name <- genName (Qualified (Just moduleName) ident)
       let argName = identToName arg
-      (decls, e) <-
+      body <-
         local
           (HashMap.insert argName (Vim.ScopedName Vim.Argument argName))
-          (genExpr expr)
-      pure [Vim.Function name [argName] Vim.Regular (decls ++ [Vim.Return e])]
+          (genExpr returnTarget expr)
+      pure [Vim.Function name [argName] Vim.Regular (targetToBlock body)]
     genDecl' _ ident expr = do
       name <- genName (Qualified (Just moduleName) ident)
-      genExpr expr >>= \case
-        (decls, Vim.Lambda [arg] body) ->
-          pure
-            [ Vim.Function
-                name
-                [arg]
-                Vim.Regular
-                (decls ++ [Vim.Return (transformBi (argScope arg) body)])
-            ]
-        (decls, e) -> pure (decls ++ [Vim.Let name e])
+      target <- genExpr (assignTarget name) expr
+      pure (targetToBlock target)
 
-argScope :: Vim.Name -> Vim.ScopedName -> Vim.ScopedName
-argScope n =
-  \case
-    Vim.ScopedName Vim.Unscoped n'
-      | n == n' -> Vim.ScopedName Vim.Argument n'
-    sn -> sn
-
+-- argScope :: Vim.Name -> Vim.ScopedName -> Vim.ScopedName
+-- argScope n =
+--   \case
+--     Vim.ScopedName Vim.Unscoped n'
+--       | n == n' -> Vim.ScopedName Vim.Argument n'
+--     sn -> sn
 extractConstructors :: Bind a -> Constructors
 extractConstructors = getConstructors
   where
