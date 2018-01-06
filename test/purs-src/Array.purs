@@ -20,3 +20,6 @@ fst3 :: forall a b c. a -> b -> c -> a
 fst3 a b c =
   case a of
     x -> x
+
+setName :: forall r. { name :: String | r } -> String -> { name :: String | r }
+setName r n = r { name = n }

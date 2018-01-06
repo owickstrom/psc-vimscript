@@ -1,3 +1,3 @@
 function! g:Array#addInt(x)
-  return {y -> x + y}
+  return {y -> a:x + y}
 endfunction

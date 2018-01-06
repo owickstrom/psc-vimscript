@@ -1,40 +1,38 @@
-{-# LANGUAGE DataKinds         #-}
-{-# LANGUAGE GADTs             #-}
-{-# LANGUAGE KindSignatures    #-}
-{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Lib
   ( loadModule
   , genModule
   ) where
 
-import           Control.Monad.Reader
-import           Control.Monad.State
-import           Data.Aeson                          (Result (..), decode)
-import           Data.Aeson.Types                    (parse)
-import           Data.Bool
-import qualified Data.ByteString.Lazy                as BS
-import           Data.Foldable
+import Control.Monad.Reader
+import Control.Monad.State
+import Data.Aeson (Result(..), decode)
+import Data.Aeson.Types (parse)
+import Data.Bool
+import qualified Data.ByteString.Lazy as BS
+import Data.Foldable
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HashMap
+import Data.List (intersperse)
+import Data.Semigroup
+import Data.Text (Text)
+import qualified Data.Text as T
+import Data.Version (Version)
 
--- import           Data.Generics.Uniplate.Data
-import           Data.HashMap.Strict                 (HashMap)
-import qualified Data.HashMap.Strict                 as HashMap
-import           Data.List                           (intersperse)
-import           Data.Semigroup
-import           Data.Text                           (Text)
-import qualified Data.Text                           as T
-import           Data.Version                        (Version)
+import Language.PureScript.AST.Literals
+import Language.PureScript.Comments
+import Language.PureScript.CoreFn
+import Language.PureScript.CoreFn.FromJSON
+import Language.PureScript.Names
+import Language.PureScript.PSString
 
-import           Language.PureScript.AST.Literals
-import           Language.PureScript.Comments
-import           Language.PureScript.CoreFn
-import           Language.PureScript.CoreFn.FromJSON
-import           Language.PureScript.Names
-import           Language.PureScript.PSString
-
-import qualified Vimscript.AST                       as Vim
+import qualified Vimscript.AST as Vim
 
 loadModule :: FilePath -> IO (Version, Module Ann)
 loadModule path = do
@@ -43,7 +41,7 @@ loadModule path = do
     Just val ->
       case parse moduleFromJSON val of
         Success m -> return m
-        Error e   -> fail e
+        Error e -> fail e
     Nothing -> fail "Couldn't read CoreFn file."
 
 type NameMappings = HashMap Vim.Name Vim.ScopedName
@@ -53,7 +51,7 @@ type Gen a = StateT GenState (Reader NameMappings) a
 type Constructors = HashMap (Text, Text) [Ident]
 
 data GenState = GenState
-  { localNameN   :: Int
+  { localNameN :: Int
   , constructors :: Constructors
   } deriving (Show, Eq)
 
@@ -76,6 +74,7 @@ data Target (t :: TargetType) where
   GenBlock :: Vim.Block -> Target 'Statement
   GenReturn :: Vim.Block -> Vim.Expr -> Target 'Statement
   GenAssign :: Vim.ScopedName -> Vim.Block -> Vim.Expr -> Target 'Statement
+  GenCopy :: Vim.ScopedName -> Vim.Block -> Vim.Expr -> Target 'Statement
   GenExpression :: Vim.Block -> Vim.Expr -> Target 'Expression
 
 returnTarget :: Vim.Block -> Vim.Expr -> Gen (Target 'Statement)
@@ -84,6 +83,9 @@ returnTarget block expr = pure (GenReturn block expr)
 assignTarget ::
      Vim.ScopedName -> Vim.Block -> Vim.Expr -> Gen (Target 'Statement)
 assignTarget name block expr = pure (GenAssign name block expr)
+
+copyTarget :: Vim.ScopedName -> Vim.Block -> Vim.Expr -> Gen (Target 'Statement)
+copyTarget name block expr = pure (GenCopy name block expr)
 
 expressionTarget :: Vim.Block -> Vim.Expr -> Gen (Target 'Expression)
 expressionTarget block expr = pure (GenExpression block expr)
@@ -96,6 +98,12 @@ targetToBlock =
     GenBlock block -> block
     GenReturn block expr -> block ++ [Vim.Return expr]
     GenAssign name block expr -> block ++ [Vim.Let name expr]
+    GenCopy name block expr ->
+      block ++
+      [ Vim.Let
+          name
+          (Vim.Apply (Vim.Ref (Vim.ScopedName Vim.BuiltIn "deepcopy")) [expr])
+      ]
     GenExpression block _ -> block
 
 targetToExpression :: Target 'Expression -> Vim.Expr
@@ -120,7 +128,7 @@ genName (Qualified (Just (ModuleName properNames)) ident) =
 psStringToText :: PSString -> Gen Text
 psStringToText str =
   case decodeString str of
-    Just t  -> pure t
+    Just t -> pure t
     Nothing -> error ("Invalid field name: " ++ show str)
 
 getConstructorFields ::
@@ -139,7 +147,7 @@ genLiteral ret =
     NumericLiteral (Right d) -> ret [] (Vim.floatingExpr d)
     StringLiteral s ->
       case decodeString s of
-        Just t  -> ret [] (Vim.stringExpr t)
+        Just t -> ret [] (Vim.stringExpr t)
         Nothing -> error ("Invalid string literal: " ++ show s)
     CharLiteral c -> ret [] (Vim.stringExpr (T.pack [c]))
     BooleanLiteral b -> ret [] (Vim.intExpr (bool 1 0 b))
@@ -159,8 +167,8 @@ genLiteral ret =
               pure (n, targetToBlock e, targetToExpression e)
 
 data CaseBranch = CaseBranch
-  { branchConditions   :: [Vim.Expr]
-  , branchStmts        :: Vim.Block
+  { branchConditions :: [Vim.Expr]
+  , branchStmts :: Vim.Block
   , branchNameMappings :: NameMappings
   } deriving (Show, Eq)
 
@@ -299,12 +307,27 @@ genExpr ret =
         (Vim.Proj
            (targetToExpression exprTarget)
            (Vim.ProjSingle (Vim.stringExpr t)))
+    ObjectUpdate _ expr newValues -> do
+      copyName <- freshLocal
+      copy <- genExpr (copyTarget copyName) expr
+      vals <- mapM (updateField copyName) newValues
+      ret (targetToBlock copy <> foldMap targetToBlock vals) (Vim.Ref copyName)
+      where updateField objName (field, newValue) = do
+              f <- psStringToText field
+              e <- genExpr expressionTarget newValue
+              let assign =
+                    Vim.Assign
+                      (Vim.AssignProj
+                         (Vim.AssignName objName)
+                         (Vim.ProjSingle (Vim.stringExpr f)))
+                      (targetToExpression e)
+              pure (GenBlock (targetToBlock e <> [assign]))
     Abs _ arg expr -> do
       let argName = identToName arg
-      closureName <- freshLocal
+      closureName <- Vim.ScopedName Vim.Unscoped <$> fresh
       body <-
         local
-          (HashMap.insert argName (Vim.ScopedName Vim.Unscoped argName))
+          (HashMap.insert argName (Vim.ScopedName Vim.Argument argName))
           (genExpr returnTarget expr)
       ret
         [Vim.Function closureName [argName] Vim.Closure (targetToBlock body)]
@@ -372,12 +395,6 @@ genDecl moduleName =
       target <- genExpr (assignTarget name) expr
       pure (targetToBlock target)
 
--- argScope :: Vim.Name -> Vim.ScopedName -> Vim.ScopedName
--- argScope n =
---   \case
---     Vim.ScopedName Vim.Unscoped n'
---       | n == n' -> Vim.ScopedName Vim.Argument n'
---     sn -> sn
 extractConstructors :: Bind a -> Constructors
 extractConstructors = getConstructors
   where
