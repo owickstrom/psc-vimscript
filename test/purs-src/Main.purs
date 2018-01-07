@@ -1,8 +1,16 @@
--- This is my custom Array module.
-module Array where
+-- Test module.
+module Main where
+
+import Prelude
+
+import Control.Monad.Eff
 
 -- | Should be taken from the Prelude instead.
 foreign import addInt :: Int -> Int -> Int
+
+foreign import data CMDLINE :: Effect
+
+foreign import echo :: forall e. String -> Eff (cmdline :: CMDLINE | e) Unit
 
 -- | A cool data structure.
 data Array a = Nil | Cons a (Array a)
@@ -23,3 +31,7 @@ fst3 a b c =
 
 setName :: forall r. { name :: String | r } -> String -> { name :: String | r }
 setName r n = r { name = n }
+
+main = do
+  echo "Hello"
+  echo "world"

@@ -3,3 +3,8 @@ exports.addInt = function (x) {
     return x + y;
   };
 }
+exports.echo = function (x) {
+  return function () {
+    console.log(x);
+  };
+}

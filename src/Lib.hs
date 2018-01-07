@@ -1,38 +1,40 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE DataKinds         #-}
+{-# LANGUAGE GADTs             #-}
+{-# LANGUAGE KindSignatures    #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards   #-}
 
 module Lib
   ( loadModule
   , genModule
   ) where
 
-import Control.Monad.Reader
-import Control.Monad.State
-import Data.Aeson (Result(..), decode)
-import Data.Aeson.Types (parse)
-import Data.Bool
-import qualified Data.ByteString.Lazy as BS
-import Data.Foldable
-import Data.HashMap.Strict (HashMap)
-import qualified Data.HashMap.Strict as HashMap
-import Data.List (intersperse)
-import Data.Semigroup
-import Data.Text (Text)
-import qualified Data.Text as T
-import Data.Version (Version)
+import           Control.Monad.Reader
+import           Control.Monad.State
+import           Data.Aeson                          (Result (..), decode)
+import           Data.Aeson.Types                    (parse)
+import           Data.Bool
+import qualified Data.ByteString.Lazy                as BS
+import           Data.Foldable
+import           Data.HashMap.Strict                 (HashMap)
+import qualified Data.HashMap.Strict                 as HashMap
+import           Data.List                           (intersperse)
+import           Data.Map.Strict                     (Map)
+import qualified Data.Map.Strict                     as Map
+import           Data.Semigroup
+import           Data.Text                           (Text)
+import qualified Data.Text                           as T
+import           Data.Version                        (Version)
 
-import Language.PureScript.AST.Literals
-import Language.PureScript.Comments
-import Language.PureScript.CoreFn
-import Language.PureScript.CoreFn.FromJSON
-import Language.PureScript.Names
-import Language.PureScript.PSString
+import           Language.PureScript.AST.Literals
+import           Language.PureScript.Comments
+import           Language.PureScript.CoreFn
+import           Language.PureScript.CoreFn.FromJSON
+import           Language.PureScript.Names
+import           Language.PureScript.PSString
 
-import qualified Vimscript.AST as Vim
+import qualified Vimscript.AST                       as Vim
 
 loadModule :: FilePath -> IO (Version, Module Ann)
 loadModule path = do
@@ -41,17 +43,19 @@ loadModule path = do
     Just val ->
       case parse moduleFromJSON val of
         Success m -> return m
-        Error e -> fail e
+        Error e   -> fail e
     Nothing -> fail "Couldn't read CoreFn file."
 
 type NameMappings = HashMap Vim.Name Vim.ScopedName
 
 type Gen a = StateT GenState (Reader NameMappings) a
 
-type Constructors = HashMap (Text, Text) [Ident]
+type Constructors
+   = Map ( Qualified (ProperName 'TypeName)
+         , Qualified (ProperName 'ConstructorName)) [Ident]
 
 data GenState = GenState
-  { localNameN :: Int
+  { localNameN   :: Int
   , constructors :: Constructors
   } deriving (Show, Eq)
 
@@ -128,15 +132,15 @@ genName (Qualified (Just (ModuleName properNames)) ident) =
 psStringToText :: PSString -> Gen Text
 psStringToText str =
   case decodeString str of
-    Just t -> pure t
+    Just t  -> pure t
     Nothing -> error ("Invalid field name: " ++ show str)
 
 getConstructorFields ::
      Qualified (ProperName 'TypeName)
   -> Qualified (ProperName 'ConstructorName)
   -> Gen [Ident]
-getConstructorFields (Qualified _mn tn) (Qualified _ cn) =
-  HashMap.lookup (runProperName tn, runProperName cn) <$> gets constructors >>= \case
+getConstructorFields tn cn =
+  Map.lookup (tn, cn) <$> gets constructors >>= \case
     Just fields -> pure fields
     Nothing -> error ("Unknown constructor: " ++ show (tn, cn))
 
@@ -147,7 +151,7 @@ genLiteral ret =
     NumericLiteral (Right d) -> ret [] (Vim.floatingExpr d)
     StringLiteral s ->
       case decodeString s of
-        Just t -> ret [] (Vim.stringExpr t)
+        Just t  -> ret [] (Vim.stringExpr t)
         Nothing -> error ("Invalid string literal: " ++ show s)
     CharLiteral c -> ret [] (Vim.stringExpr (T.pack [c]))
     BooleanLiteral b -> ret [] (Vim.intExpr (bool 1 0 b))
@@ -167,8 +171,8 @@ genLiteral ret =
               pure (n, targetToBlock e, targetToExpression e)
 
 data CaseBranch = CaseBranch
-  { branchConditions :: [Vim.Expr]
-  , branchStmts :: Vim.Block
+  { branchConditions   :: [Vim.Expr]
+  , branchStmts        :: Vim.Block
   , branchNameMappings :: NameMappings
   } deriving (Show, Eq)
 
@@ -252,7 +256,7 @@ ctorTest (Qualified _ typeName) (Qualified _ ctorName) expr =
         (Vim.Proj expr (Vim.ProjSingle (Vim.stringExpr f)))
         (Vim.stringExpr n)
 
-genBinder :: TargetRet t -> Vim.Expr -> Binder a -> Gen CaseBranch
+genBinder :: TargetRet t -> Vim.Expr -> Binder Ann -> Gen CaseBranch
 genBinder ret expr =
   \case
     NullBinder _ -> pure mempty
@@ -265,6 +269,8 @@ genBinder ret expr =
            { branchStmts = [Vim.Let sn expr]
            , branchNameMappings = HashMap.singleton name sn
            }
+    ConstructorBinder (_, _, _, Just IsNewtype) _typeName _ctorName [binder] ->
+      genBinder ret expr binder
     ConstructorBinder _ typeName ctorName binders -> do
       fields <- getConstructorFields typeName ctorName
       let test = ctorTest typeName ctorName expr
@@ -280,7 +286,8 @@ genBinder ret expr =
         , branchNameMappings = HashMap.insert n sn (branchNameMappings branch)
         }
 
-genFieldBinder :: TargetRet t -> Vim.Expr -> Ident -> Binder a -> Gen CaseBranch
+genFieldBinder ::
+     TargetRet t -> Vim.Expr -> Ident -> Binder Ann -> Gen CaseBranch
 genFieldBinder tgt dict field binder = do
   let proj = Vim.Proj dict (Vim.ProjSingle (Vim.stringExpr (runIdent field)))
   genBinder tgt proj binder
@@ -323,15 +330,15 @@ genExpr ret =
                       (targetToExpression e)
               pure (GenBlock (targetToBlock e <> [assign]))
     Abs _ arg expr -> do
-      let argName = identToName arg
-      closureName <- Vim.ScopedName Vim.Unscoped <$> fresh
-      body <-
-        local
-          (HashMap.insert argName (Vim.ScopedName Vim.Argument argName))
-          (genExpr returnTarget expr)
-      ret
-        [Vim.Function closureName [argName] Vim.Closure (targetToBlock body)]
-        (Vim.FuncRef closureName)
+        let argName = identToName arg
+        closureName <- Vim.ScopedName Vim.Unscoped <$> fresh
+        body <-
+          local
+            (HashMap.insert argName (Vim.ScopedName Vim.Argument argName))
+            (genExpr returnTarget expr)
+        ret
+          [Vim.Function closureName [argName] Vim.Closure (targetToBlock body)]
+          (Vim.FuncRef closureName)
     App _ f p -> do
       f' <- genExpr expressionTarget f
       p' <- genExpr expressionTarget p
@@ -360,7 +367,16 @@ genBind =
   \case
     NonRec ann ident expr -> genBind' ann ident expr
     Rec binds -> do
-      bs <- mapM (\((ann, ident), expr) -> genBind' ann ident expr) binds
+      let nameMappings =
+            HashMap.fromList
+              [ ( identToName ident
+                , Vim.ScopedName Vim.Local (identToName ident))
+              | ((_, ident), _) <- binds
+              ]
+      bs <-
+        local
+          (HashMap.union nameMappings)
+          (mapM (\((ann, ident), expr) -> genBind' ann ident expr) binds)
       pure (foldMap fst bs, GenBlock (foldMap (targetToBlock . snd) bs))
   where
     genBind' _ ident expr = do
@@ -391,34 +407,41 @@ genDecl moduleName =
           (genExpr returnTarget expr)
       pure [Vim.Function name [argName] Vim.Regular (targetToBlock body)]
     genDecl' _ ident expr = do
+      fName <- Vim.ScopedName Vim.Script <$> fresh
+      body <- genExpr returnTarget expr
+      let f = Vim.Function fName [] Vim.Regular (targetToBlock body)
       name <- genName (Qualified (Just moduleName) ident)
-      target <- genExpr (assignTarget name) expr
-      pure (targetToBlock target)
+      let invocation = Vim.Let name (Vim.Apply (Vim.Ref fName) [])
+      pure [f, invocation]
 
-extractConstructors :: Bind a -> Constructors
-extractConstructors = getConstructors
+extractConstructors :: ModuleName -> Bind a -> Constructors
+extractConstructors mn = getConstructors
   where
     (getConstructors, _, _, _) =
       everythingOnValues
-        HashMap.union
+        Map.union
         (const mempty)
         (\case
            Constructor _ typeName ctorName fieldNames ->
-             HashMap.singleton
-               (runProperName typeName, runProperName ctorName)
+             Map.singleton
+               (Qualified (Just mn) typeName, Qualified (Just mn) ctorName)
                fieldNames
            _ -> mempty)
         (const mempty)
         (const mempty)
 
-genModule :: (Version, Module Ann) -> Vim.Program
-genModule (_version, Module {..}) =
+genModule :: Map ModuleName (Module Ann) -> (Version, Module Ann) -> Vim.Program
+genModule importedModules (_version, m) =
   runReader (evalStateT gen initialState) mempty
   where
+    moduleCtors = foldMap (extractConstructors (moduleName m)) (moduleDecls m)
+    importedCtors =
+      foldMap
+        (\im -> foldMap (extractConstructors (moduleName im)) (moduleDecls im))
+        importedModules
     initialState =
-      GenState
-      {localNameN = 0, constructors = foldMap extractConstructors moduleDecls}
+      GenState {localNameN = 0, constructors = moduleCtors <> importedCtors}
     gen = do
-      comments <- mapM genComment moduleComments
-      stmts <- mapM (genDecl moduleName) moduleDecls
+      comments <- mapM genComment (moduleComments m)
+      stmts <- mapM (genDecl (moduleName m)) (moduleDecls m)
       pure (Vim.Program (concat comments ++ concat stmts))

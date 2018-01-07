@@ -2,10 +2,15 @@ module Main where
 
 import           Control.Monad
 import           Data.Foldable
+import           Data.Map.Strict            (Map)
+import qualified Data.Map.Strict            as Map
 import           Data.Maybe
 import           Data.Semigroup
+import           Data.Set                   (Set)
+import qualified Data.Set                   as Set
 import qualified Data.Text                  as T
 import qualified Data.Text.IO               as T
+import           Data.Version               (Version)
 import           Language.PureScript.CoreFn
 import           Language.PureScript.Names
 import           Lib
@@ -34,15 +39,41 @@ readForeignFile path = do
     then Just . T.pack <$> readFile path
     else pure Nothing
 
+data InputModule = InputModule
+  { version      :: Version
+  , pursModule   :: Module Ann
+  , outPath      :: FilePath
+  , foreignsPath :: FilePath
+  }
+
+importedModuleNames :: InputModule -> Set ModuleName
+importedModuleNames im = Set.fromList (map snd (moduleImports (pursModule im)))
+
+loadModules :: IO [InputModule]
+loadModules = do
+  files <- getArgs
+  forM files $ \f -> do
+    (v, m) <- loadModule f
+    pure
+      InputModule
+      { version = v
+      , pursModule = m
+      , outPath = moduleOutPath ("vim-output" </> "autoload") (moduleName m)
+      , foreignsPath = moduleForeignsPath "test/purs-src" (moduleName m)
+      }
+
+indexModules :: [InputModule] -> Map ModuleName (Module Ann)
+indexModules ims =
+  Map.fromList [(moduleName (pursModule im), pursModule im) | im <- ims]
+
 main :: IO ()
 main = do
-  files <- getArgs
-  forM_ files $ \f -> do
-    (version, m) <- loadModule f
-    let out = moduleOutPath "vim-output" (moduleName m)
-        foreignsPath = moduleForeignsPath "test/purs-src" (moduleName m)
-        prg = genModule (version, m)
+  modules <- loadModules
+  let modulesByName = indexModules modules
+  forM_ modules $ \im -> do
+    let importedModules = modulesByName -- Map.restrictKeys modulesByName (importedModuleNames im)
+        prg = genModule importedModules (version im, pursModule im)
         t = T.pack (pretty 200 (renderProgram prg))
-    foreigns <- fromMaybe mempty <$> readForeignFile foreignsPath
-    createDirectoryIfMissing True (takeDirectory out)
-    T.writeFile out (foreigns <> t)
+    foreigns <- fromMaybe mempty <$> readForeignFile (foreignsPath im)
+    createDirectoryIfMissing True (takeDirectory (outPath im))
+    T.writeFile (outPath im) (foreigns <> t)
