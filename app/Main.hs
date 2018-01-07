@@ -88,8 +88,8 @@ main = do
   modules <- loadModules
   let modulesByName = indexModules modules
   forM_ modules $ \im -> do
-    let prg = genModule modulesByName (version im, pursModule im)
-    foreigns <- fromMaybe mempty <$> readForeignFileFromPaths (foreignsPaths im)
-    let t = pretty 200 (renderProgram foreigns prg)
+    foreigns <- readForeignFileFromPaths (foreignsPaths im)
+    let prg = genModule modulesByName foreigns (version im, pursModule im)
+        t = pretty 200 (renderProgram prg)
     createDirectoryIfMissing True (takeDirectory (outPath im))
     writeFile (outPath im) t

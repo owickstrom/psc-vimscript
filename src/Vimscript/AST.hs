@@ -43,6 +43,9 @@ instance Hashable ScopedName
 builtIn :: Text -> ScopedName
 builtIn = ScopedName BuiltIn . Name
 
+newtype PackName = PackName Text
+  deriving (Eq, Show, Data, Typeable)
+
 data BinOp
   = Add
   | Subtract
@@ -92,6 +95,7 @@ data Expr
          Projection
   | FuncRef ScopedName
   | Lambda [Name] Expr
+  | Exists ScopedName
   deriving (Eq, Show, Data, Typeable)
 
 intExpr :: Integer -> Expr
@@ -153,8 +157,10 @@ data Stmt
   | Assign AssignTarget
            Expr
   | BuiltInStmt Name
-                Expr
+                (Maybe Expr)
   | ExprStmt Expr
+  | PackAdd PackName
+  | Raw Text
   deriving (Eq, Show, Data, Typeable)
 
 pattern LocalLet :: Name -> Expr -> Stmt
@@ -169,9 +175,5 @@ pattern ScopedLet :: NameScope -> Name -> Expr -> Stmt
 
 pattern ScopedLet s n e = Let (ScopedName s n) e
 
-newtype PackName = PackName Text
-  deriving (Eq, Show, Data, Typeable)
-
-data Program =
-  Program { programImports :: [PackName], programStmts :: [Stmt]}
+newtype Program = Program { programStmts :: [Stmt]}
   deriving (Eq, Show, Data, Typeable)

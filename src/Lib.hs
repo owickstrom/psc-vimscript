@@ -1,9 +1,9 @@
-{-# LANGUAGE DataKinds         #-}
-{-# LANGUAGE GADTs             #-}
-{-# LANGUAGE KindSignatures    #-}
-{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Lib
   ( loadModule
@@ -11,34 +11,34 @@ module Lib
   , genModule
   ) where
 
-import           Control.Monad.Reader
-import           Control.Monad.State
-import           Data.Aeson                          (Result (..), decode)
-import           Data.Aeson.Types                    (parse)
-import           Data.Bool
-import qualified Data.ByteString.Lazy                as BS
-import           Data.Foldable
-import           Data.HashMap.Strict                 (HashMap)
-import qualified Data.HashMap.Strict                 as HashMap
-import           Data.List                           (intersperse)
-import           Data.Map.Strict                     (Map)
-import qualified Data.Map.Strict                     as Map
-import           Data.Maybe                          (fromMaybe)
-import           Data.Semigroup
-import           Data.Set                            (Set)
-import qualified Data.Set                            as Set
-import           Data.Text                           (Text)
-import qualified Data.Text                           as T
-import           Data.Version                        (Version)
+import Control.Monad.Reader
+import Control.Monad.State
+import Data.Aeson (Result(..), decode)
+import Data.Aeson.Types (parse)
+import Data.Bool
+import qualified Data.ByteString.Lazy as BS
+import Data.Foldable
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HashMap
+import Data.List (intersperse)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
+import Data.Semigroup
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as T
+import Data.Version (Version)
 
-import           Language.PureScript.AST.Literals
-import           Language.PureScript.Comments
-import           Language.PureScript.CoreFn
-import           Language.PureScript.CoreFn.FromJSON
-import           Language.PureScript.Names
-import           Language.PureScript.PSString
+import Language.PureScript.AST.Literals
+import Language.PureScript.Comments
+import Language.PureScript.CoreFn
+import Language.PureScript.CoreFn.FromJSON
+import Language.PureScript.Names
+import Language.PureScript.PSString
 
-import qualified Vimscript.AST                       as Vim
+import qualified Vimscript.AST as Vim
 
 loadModule :: FilePath -> IO (Version, Module Ann)
 loadModule path = do
@@ -47,7 +47,7 @@ loadModule path = do
     Just val ->
       case parse moduleFromJSON val of
         Success m -> return m
-        Error e   -> fail e
+        Error e -> fail e
     Nothing -> fail "Couldn't read CoreFn file."
 
 modulePackName :: ModuleName -> Vim.PackName
@@ -66,7 +66,7 @@ type Constructors
 type TopLevelDefinitions = Set (Qualified Ident)
 
 data GenState = GenState
-  { localNameN   :: Int
+  { localNameN :: Int
   , constructors :: Constructors
   , topLevelDefs :: TopLevelDefinitions
   }
@@ -75,7 +75,7 @@ type NameMappings = HashMap Vim.Name Vim.ScopedName
 
 data GenEnv = GenEnv
   { currentModuleName :: ModuleName
-  , nameMappings      :: NameMappings
+  , nameMappings :: NameMappings
   }
 
 withNewMappings :: NameMappings -> Gen a -> Gen a
@@ -149,7 +149,7 @@ qualifiedName (ModuleName properNames) ident =
 psStringToText :: PSString -> Gen Text
 psStringToText str =
   case decodeString str of
-    Just t  -> pure t
+    Just t -> pure t
     Nothing -> error ("Invalid field name: " ++ show str)
 
 getConstructorFields ::
@@ -168,7 +168,7 @@ genLiteral ret =
     NumericLiteral (Right d) -> ret [] (Vim.floatingExpr d)
     StringLiteral s ->
       case decodeString s of
-        Just t  -> ret [] (Vim.stringExpr t)
+        Just t -> ret [] (Vim.stringExpr t)
         Nothing -> error ("Invalid string literal: " ++ show s)
     CharLiteral c -> ret [] (Vim.stringExpr (T.pack [c]))
     BooleanLiteral b -> ret [] (Vim.intExpr (bool 1 0 b))
@@ -188,8 +188,8 @@ genLiteral ret =
               pure (n, targetToBlock e, targetToExpression e)
 
 data CaseBranch = CaseBranch
-  { branchConditions   :: [Vim.Expr]
-  , branchStmts        :: Vim.Block
+  { branchConditions :: [Vim.Expr]
+  , branchStmts :: Vim.Block
   , branchNameMappings :: NameMappings
   } deriving (Show, Eq)
 
@@ -413,7 +413,7 @@ singleTopLevelLet moduleName ident expr = do
   body <- genExpr (assignTarget name) expr
   case targetToBlock body of
     [letStmt] -> pure (Just [letStmt])
-    _         -> pure Nothing
+    _ -> pure Nothing
 
 wrapTopLevelLet :: ModuleName -> Ident -> Expr Ann -> Gen Vim.Block
 wrapTopLevelLet moduleName ident expr = do
@@ -430,15 +430,15 @@ genDecl moduleName =
     NonRec ann ident expr -> genDecl' ann ident expr
     Rec binds ->
       concat <$> mapM (\((ann, ident), expr) -> genDecl' ann ident expr) binds
-    {-genDecl' _ ident (Abs _ arg expr) = do-}
-      {-let name = qualifiedName moduleName ident-}
-      {-let argName = identToName arg-}
-      {-body <--}
-        {-withNewMappings-}
-          {-(HashMap.singleton argName (Vim.ScopedName Vim.Argument argName))-}
-          {-(genExpr returnTarget expr)-}
-      {-pure [Vim.Function name [argName] Vim.Regular (targetToBlock body)]-}
   where
+    genDecl' _ ident (Abs _ arg expr) = do
+      let name = qualifiedName moduleName ident
+      let argName = identToName arg
+      body <-
+        withNewMappings
+          (HashMap.singleton argName (Vim.ScopedName Vim.Argument argName))
+          (genExpr returnTarget expr)
+      pure [Vim.Function name [argName] Vim.Regular (targetToBlock body)]
     genDecl' _ ident expr =
       fromMaybe <$> wrapTopLevelLet moduleName ident expr <*>
       singleTopLevelLet moduleName ident expr
@@ -463,8 +463,24 @@ extractTopLevelDefs :: ModuleName -> Module Ann -> TopLevelDefinitions
 extractTopLevelDefs mn m =
   Set.fromList (map (Qualified (Just mn)) (moduleExports m))
 
-genModule :: Map ModuleName (Module Ann) -> (Version, Module Ann) -> Vim.Program
-genModule allModules (_version, m) =
+packLoadedGuard :: Vim.Block
+packLoadedGuard =
+  [ Vim.Cond
+      (Vim.CondStmt
+         (Vim.CondCase (Vim.Exists sn) [Vim.BuiltInStmt "finish" Nothing])
+         []
+         Nothing)
+  , Vim.Assign (Vim.AssignName sn) (Vim.intExpr 1)
+  ]
+  where
+    sn = Vim.ScopedName Vim.Script "purs_loaded"
+
+genModule ::
+     Map ModuleName (Module Ann)
+  -> Maybe Text
+  -> (Version, Module Ann)
+  -> Vim.Program
+genModule allModules prelude (_version, m) =
   runReader (evalStateT gen initialState) initialEnv
   where
     moduleCtors = foldMap (extractConstructors (moduleName m)) (moduleDecls m)
@@ -473,10 +489,11 @@ genModule allModules (_version, m) =
         (\im -> foldMap (extractConstructors (moduleName im)) (moduleDecls im))
         allModules
     imports =
-      [ modulePackName n
+      [ Vim.PackAdd (modulePackName n)
       | (_, n) <- moduleImports m
       , n /= primModule && n /= moduleName m
       ]
+    preludeBlock = maybe [] ((: []) . Vim.Raw) prelude
     initialState =
       GenState
       { localNameN = 0
@@ -488,9 +505,15 @@ genModule allModules (_version, m) =
       GenEnv {nameMappings = mempty, currentModuleName = moduleName m}
     gen = do
       comments <- mapM genComment (moduleComments m)
-      stmts <- mapM (genDecl (moduleName m)) (moduleDecls m)
+      stmts <- concat <$> mapM (genDecl (moduleName m)) (moduleDecls m)
       pure
         Vim.Program
-        { programImports = imports
-        , programStmts = concat comments ++ concat stmts
+        { programStmts =
+            concat
+              [ packLoadedGuard
+              , concat comments
+              , imports
+              , preludeBlock
+              , stmts
+              ]
         }

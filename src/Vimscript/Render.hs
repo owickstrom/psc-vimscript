@@ -88,6 +88,8 @@ renderExpr =
       parens (squotes (renderScopedName scopedName))
     Lambda args expr ->
       braces $ commasep (map renderName args) <+> "->" <+> renderExpr expr
+    Exists sn ->
+      "exists" <> parens (squotes (renderScopedName sn))
 
 renderAssignTarget :: AssignTarget -> Doc
 renderAssignTarget =
@@ -130,23 +132,15 @@ renderStmt =
               renderCase ("elseif" <+> renderExpr expr) block
     Assign tgt expr ->
       "let" <+> renderAssignTarget tgt <+> "=" <+> renderExpr expr
-    BuiltInStmt name expr -> renderName name <+> parens (renderExpr expr)
+    BuiltInStmt name expr ->
+      renderName name <+> maybe mempty (parens . renderExpr) expr
     LineComment contents -> "\"" <+> strictText contents
     ExprStmt expr -> renderExpr expr
+    PackAdd (PackName n) -> "packadd" <+> strictText n
+    Raw code -> strictText code
 
 renderBlock :: Block -> Doc
 renderBlock = stack . map renderStmt
 
-packLoadedGuard :: Doc
-packLoadedGuard =
-  "if exists('s:purs__loaded')" </> indent indentWidth "finish" </> "endif" </>
-  "let s:purs__loaded=1"
-
-renderImport :: PackName -> Doc
-renderImport (PackName name) = "packadd" <+> strictText name
-
-renderProgram :: Text -> Program -> Doc
-renderProgram prelude (Program imports stmts) =
-  stack
-    ([packLoadedGuard] <> map renderImport imports <> [strictText prelude] <>
-     map renderStmt stmts)
+renderProgram :: Program -> Doc
+renderProgram prg = stack (map renderStmt (programStmts prg))
