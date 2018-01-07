@@ -1,39 +1,41 @@
-{-# LANGUAGE DataKinds         #-}
-{-# LANGUAGE GADTs             #-}
-{-# LANGUAGE KindSignatures    #-}
-{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Lib
   ( modulePackName
   , genModule
   ) where
 
-import           Control.Monad.Reader
-import           Control.Monad.State
-import           Data.Bool
-import           Data.Foldable
-import           Data.HashMap.Strict                 (HashMap)
-import qualified Data.HashMap.Strict                 as HashMap
-import           Data.List                           (intersperse)
-import           Data.Map.Strict                     (Map)
-import qualified Data.Map.Strict                     as Map
-import           Data.Maybe                          (fromMaybe)
-import           Data.Semigroup
-import           Data.Set                            (Set)
-import qualified Data.Set                            as Set
-import           Data.Text                           (Text)
-import qualified Data.Text                           as T
-import           Data.Version                        (Version)
+import Control.Monad.Reader
+import Control.Monad.State
+import Data.Bool
+import Data.Foldable
+import Data.List (intersperse)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
+import Data.Semigroup
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as T
+import Data.Version (Version)
 
-import           Language.PureScript.AST.Literals
-import           Language.PureScript.Comments
-import           Language.PureScript.CoreFn
-import           Language.PureScript.Names
-import           Language.PureScript.PSString
+import Language.PureScript.AST.Literals
+import Language.PureScript.Comments
+import Language.PureScript.CoreFn
+import Language.PureScript.Names
+import Language.PureScript.PSString
 
-import qualified Vimscript.AST                       as Vim
+import qualified Vimscript.AST as Vim
+import ZEncoding (zEncode)
+
+import Debug.Trace
+
 modulePackName :: ModuleName -> Vim.PackName
 modulePackName (ModuleName ns) =
   Vim.PackName (T.intercalate "." (map runProperName ns))
@@ -50,21 +52,22 @@ type Constructors
 type TopLevelDefinitions = Set (Qualified Ident)
 
 data GenState = GenState
-  { localNameN        :: Int
-  , constructors      :: Constructors
+  { localNameN :: Int
+  , constructors :: Constructors
+  , liftedBlocks :: [Vim.Block]
   }
 
-type NameMappings = HashMap Vim.Name Vim.ScopedName
+type NameMappings = Map Ident Vim.ScopedName
 
 data GenEnv = GenEnv
   { currentModuleName :: ModuleName
-  , nameMappings      :: NameMappings
+  , nameMappings :: NameMappings
   , topLevelFunctions :: TopLevelDefinitions
   }
 
 withNewMappings :: NameMappings -> Gen a -> Gen a
 withNewMappings newMappings =
-  local (\e -> e {nameMappings = HashMap.union (nameMappings e) newMappings})
+  local (\e -> e {nameMappings = Map.union (nameMappings e) newMappings})
 
 fresh :: Gen Vim.Name
 fresh = do
@@ -121,7 +124,7 @@ targetToExpression :: Target 'Expression -> Vim.Expr
 targetToExpression (GenExpression _ expr) = expr
 
 identToName :: Ident -> Vim.Name
-identToName = Vim.Name . runIdent
+identToName = Vim.Name . zEncode . runIdent
 
 qualifiedName :: ModuleName -> Ident -> Vim.ScopedName
 qualifiedName (ModuleName properNames) ident =
@@ -133,7 +136,7 @@ qualifiedName (ModuleName properNames) ident =
 psStringToText :: PSString -> Gen Text
 psStringToText str =
   case decodeString str of
-    Just t  -> pure t
+    Just t -> pure t
     Nothing -> error ("Invalid field name: " ++ show str)
 
 getConstructorFields ::
@@ -152,7 +155,7 @@ genLiteral ret =
     NumericLiteral (Right d) -> ret [] (Vim.floatingExpr d)
     StringLiteral s ->
       case decodeString s of
-        Just t  -> ret [] (Vim.stringExpr t)
+        Just t -> ret [] (Vim.stringExpr t)
         Nothing -> error ("Invalid string literal: " ++ show s)
     CharLiteral c -> ret [] (Vim.stringExpr (T.pack [c]))
     BooleanLiteral b -> ret [] (Vim.intExpr (bool 1 0 b))
@@ -172,8 +175,8 @@ genLiteral ret =
               pure (n, targetToBlock e, targetToExpression e)
 
 data CaseBranch = CaseBranch
-  { branchConditions   :: [Vim.Expr]
-  , branchStmts        :: Vim.Block
+  { branchConditions :: [Vim.Expr]
+  , branchStmts :: Vim.Block
   , branchNameMappings :: NameMappings
   } deriving (Show, Eq)
 
@@ -261,14 +264,13 @@ genBinder :: TargetRet t -> Vim.Expr -> Binder Ann -> Gen CaseBranch
 genBinder ret expr =
   \case
     NullBinder _ -> pure mempty
-    LiteralBinder _ _lit -> pure mempty
+    LiteralBinder _ _lit -> pure mempty -- TODO: literal binder!
     VarBinder _ ident ->
-      let name = identToName ident
-          sn = Vim.ScopedName Vim.Local name
+      let sn = Vim.ScopedName Vim.Local (identToName ident)
       in pure
            mempty
            { branchStmts = [Vim.Let sn expr]
-           , branchNameMappings = HashMap.singleton name sn
+           , branchNameMappings = Map.singleton ident sn
            }
     ConstructorBinder (_, _, _, Just IsNewtype) _typeName _ctorName [binder] ->
       genBinder ret expr binder
@@ -278,13 +280,12 @@ genBinder ret expr =
       branch <- fold <$> zipWithM (genFieldBinder ret expr) fields binders
       pure branch {branchConditions = test : branchConditions branch}
     NamedBinder _ ident binder -> do
-      let n = identToName ident
-          sn = Vim.ScopedName Vim.Local n
+      let sn = Vim.ScopedName Vim.Local (identToName ident)
       branch <- genBinder ret expr binder
       pure
         branch
         { branchStmts = Vim.Let sn expr : branchStmts branch
-        , branchNameMappings = HashMap.insert n sn (branchNameMappings branch)
+        , branchNameMappings = Map.insert ident sn (branchNameMappings branch)
         }
 
 genFieldBinder ::
@@ -292,6 +293,29 @@ genFieldBinder ::
 genFieldBinder tgt dict field binder = do
   let proj = Vim.Proj dict (Vim.ProjSingle (Vim.stringExpr (runIdent field)))
   genBinder tgt proj binder
+
+freeVariables :: Expr a -> Set Ident
+freeVariables = free
+  where
+    (_, free, _, _) =
+      everythingOnValues
+        (<>)
+        (const mempty)
+        (\case
+           Var _ (Qualified Nothing ident) -> Set.singleton ident
+           _ -> mempty)
+        (const mempty)
+        (const mempty)
+
+lookupIdent :: Ident -> Gen Vim.Expr
+lookupIdent ident = do
+  mappings <- asks nameMappings
+  case Map.lookup ident mappings of
+    Just sn -> pure (Vim.Ref sn)
+    Nothing -> pure (Vim.Ref (Vim.ScopedName Vim.Script (identToName ident)))
+
+liftBlock :: Vim.Block -> Gen ()
+liftBlock block = modify (\s -> s {liftedBlocks = liftedBlocks s <> [block]})
 
 genExpr :: TargetRet t -> Expr Ann -> Gen (Target t)
 genExpr ret =
@@ -331,27 +355,40 @@ genExpr ret =
                       (targetToExpression e)
               pure (GenBlock (targetToBlock e <> [assign]))
     Abs _ arg expr -> do
-      let argName = identToName arg
-      closureName <- Vim.ScopedName Vim.Unscoped <$> fresh
+      localVariables <- asks (Map.keysSet . nameMappings)
+      liftedName <- Vim.ScopedName Vim.Script <$> fresh
+      let freeVars =
+            Set.toList (freeVariables expr `Set.intersection` localVariables)
+          origArg = identToName arg
+          newArgs = map identToName freeVars
+          mappings =
+            Map.fromList
+              (zip
+                 (arg : freeVars)
+                 (map (Vim.ScopedName Vim.Argument) (origArg : newArgs)))
       body <-
-        withNewMappings
-          (HashMap.singleton argName (Vim.ScopedName Vim.Argument argName))
-          (genExpr returnTarget expr)
-      ret
-        [Vim.Function closureName [argName] Vim.Closure (targetToBlock body)]
-        (Vim.FuncRef closureName)
+        local (\e -> e {nameMappings = mappings}) (genExpr returnTarget expr)
+      liftBlock
+        [ Vim.Function
+            liftedName
+            (origArg : newArgs)
+            Vim.Regular
+            (targetToBlock body)
+        ]
+      case freeVars of
+        [] -> ret [] (Vim.FuncRef liftedName)
+        _ -> do
+          params <-
+            (Vim.Ref (Vim.ScopedName Vim.Unscoped origArg) :) <$>
+            mapM lookupIdent freeVars
+          ret [] (Vim.Lambda [origArg] (Vim.Apply (Vim.Ref liftedName) params))
     App _ f p -> do
       f' <- genExpr expressionTarget f
       p' <- genExpr expressionTarget p
       ret
         (targetToBlock f' <> targetToBlock p')
         (Vim.Apply (targetToExpression f') [targetToExpression p'])
-    Var _ (Qualified Nothing ident) -> do
-      mappings <- asks nameMappings
-      let name = identToName ident
-      case HashMap.lookup name mappings of
-        Just sn -> ret [] (Vim.Ref sn)
-        Nothing -> ret [] (Vim.Ref (Vim.ScopedName Vim.Script name))
+    Var _ (Qualified Nothing ident) -> lookupIdent ident >>= ret []
     Var _ qn@(Qualified (Just mn) ident)
       | mn == primModule -> ret [] (Vim.Ref (qualifiedName mn ident))
       | otherwise -> do
@@ -383,10 +420,9 @@ genBind =
       pure (foldMap fst bs, GenBlock (foldMap (targetToBlock . snd) bs))
   where
     genBind' _ ident expr = do
-      let name = identToName ident
-          sn = Vim.ScopedName Vim.Local name
+      let sn = Vim.ScopedName Vim.Local (identToName ident)
       e <- genExpr (assignTarget sn) expr
-      pure (HashMap.singleton name sn, GenBlock (targetToBlock e))
+      pure (Map.singleton ident sn, GenBlock (targetToBlock e))
 
 genComment :: Comment -> Gen Vim.Block
 genComment =
@@ -400,7 +436,7 @@ singleTopLevelLet moduleName ident expr = do
   body <- genExpr (assignTarget name) expr
   case targetToBlock body of
     [letStmt] -> pure (Just [letStmt])
-    _         -> pure Nothing
+    _ -> pure Nothing
 
 wrapTopLevelLet :: ModuleName -> Ident -> Expr Ann -> Gen Vim.Block
 wrapTopLevelLet moduleName ident expr = do
@@ -423,7 +459,7 @@ genDecl moduleName =
       let argName = identToName arg
       body <-
         withNewMappings
-          (HashMap.singleton argName (Vim.ScopedName Vim.Argument argName))
+          (Map.singleton arg (Vim.ScopedName Vim.Argument argName))
           (genExpr returnTarget expr)
       pure [Vim.Function name [argName] Vim.Regular (targetToBlock body)]
     genDecl' _ ident expr =
@@ -470,13 +506,27 @@ packLoadedGuard =
   where
     sn = Vim.ScopedName Vim.Script "purs_loaded"
 
+runGen :: GenEnv -> GenState -> Gen a -> (a, GenState)
+runGen env st gen = runReader (runStateT gen st) env
+
+extractLifted :: Gen Vim.Block -> Gen Vim.Block
+extractLifted gen = do
+  env <- ask
+  st <- get
+  let (x, st') = runGen env st gen
+  put st' {liftedBlocks = []}
+  pure (concat (liftedBlocks st' <> [x]))
+
+genDeclAndLifted :: ModuleName -> Bind Ann -> Gen Vim.Block
+genDeclAndLifted moduleName = extractLifted . genDecl moduleName
+
 genModule ::
      Map ModuleName (Module Ann)
   -> Maybe Text
   -> (Version, Module Ann)
   -> Vim.Program
 genModule allModules prelude (_version, m) =
-  runReader (evalStateT gen initialState) initialEnv
+  fst (runGen initialEnv initialState gen)
   where
     moduleCtors = foldMap (extractConstructors (moduleName m)) (moduleDecls m)
     importedCtors =
@@ -490,7 +540,11 @@ genModule allModules prelude (_version, m) =
       ]
     preludeBlock = maybe [] ((: []) . Vim.Raw) prelude
     initialState =
-      GenState {localNameN = 0, constructors = moduleCtors <> importedCtors}
+      GenState
+      { localNameN = 0
+      , constructors = moduleCtors <> importedCtors
+      , liftedBlocks = []
+      }
     initialEnv =
       GenEnv
       { nameMappings = mempty
@@ -500,7 +554,8 @@ genModule allModules prelude (_version, m) =
       }
     gen = do
       comments <- mapM genComment (moduleComments m)
-      stmts <- concat <$> mapM (genDecl (moduleName m)) (moduleDecls m)
+      stmts <-
+        (concat <$> mapM (genDeclAndLifted (moduleName m)) (moduleDecls m))
       pure
         Vim.Program
         { programStmts =

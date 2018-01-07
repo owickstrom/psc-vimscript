@@ -18,6 +18,7 @@ library
   exposed-modules:     Lib
                        Vimscript.AST
                        Vimscript.Render
+                       ZEncoding
   build-depends:       base >= 4.7 && < 5
                      , containers
                      , unordered-containers
