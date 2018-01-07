@@ -6,17 +6,13 @@
 {-# LANGUAGE RecordWildCards   #-}
 
 module Lib
-  ( loadModule
-  , modulePackName
+  ( modulePackName
   , genModule
   ) where
 
 import           Control.Monad.Reader
 import           Control.Monad.State
-import           Data.Aeson                          (Result (..), decode)
-import           Data.Aeson.Types                    (parse)
 import           Data.Bool
-import qualified Data.ByteString.Lazy                as BS
 import           Data.Foldable
 import           Data.HashMap.Strict                 (HashMap)
 import qualified Data.HashMap.Strict                 as HashMap
@@ -34,22 +30,10 @@ import           Data.Version                        (Version)
 import           Language.PureScript.AST.Literals
 import           Language.PureScript.Comments
 import           Language.PureScript.CoreFn
-import           Language.PureScript.CoreFn.FromJSON
 import           Language.PureScript.Names
 import           Language.PureScript.PSString
 
 import qualified Vimscript.AST                       as Vim
-
-loadModule :: FilePath -> IO (Version, Module Ann)
-loadModule path = do
-  j <- BS.readFile path
-  case decode j of
-    Just val ->
-      case parse moduleFromJSON val of
-        Success m -> return m
-        Error e   -> fail e
-    Nothing -> fail "Couldn't read CoreFn file."
-
 modulePackName :: ModuleName -> Vim.PackName
 modulePackName (ModuleName ns) =
   Vim.PackName (T.intercalate "." (map runProperName ns))

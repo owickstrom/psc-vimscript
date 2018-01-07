@@ -3,11 +3,14 @@
 
 module Main where
 
+import           Data.Aeson                          (Result (..), decode)
+import           Language.PureScript.CoreFn.FromJSON
+import qualified Data.ByteString.Lazy                as BS
+import           Data.Aeson.Types                    (parse)
 import           Control.Monad
 import           Data.Foldable
 import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as Map
-import           Data.Maybe
 import           Data.Set                   (Set)
 import qualified Data.Set                   as Set
 import qualified Data.Text                  as T
@@ -21,6 +24,16 @@ import           System.FilePath
 import           Text.PrettyPrint.Mainland  (pretty)
 import qualified Vimscript.AST              as Vim
 import           Vimscript.Render
+
+loadModule :: FilePath -> IO (Version, Module Ann)
+loadModule path = do
+  j <- BS.readFile path
+  case decode j of
+    Just val ->
+      case parse moduleFromJSON val of
+        Success m -> return m
+        Error e   -> fail e
+    Nothing -> fail "Couldn't read CoreFn file."
 
 moduleOutPath :: FilePath -> ModuleName -> FilePath
 moduleOutPath outDir mn@(ModuleName properNames) =
