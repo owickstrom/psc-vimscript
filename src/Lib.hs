@@ -1,40 +1,40 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE DataKinds         #-}
+{-# LANGUAGE GADTs             #-}
+{-# LANGUAGE KindSignatures    #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards   #-}
 
 module Lib
   ( modulePackName
   , genModule
   ) where
 
-import Control.Monad.Reader
-import Control.Monad.State
-import Data.Bool
-import Data.Foldable
-import Data.List (intersperse)
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
-import Data.Semigroup
-import Data.Set (Set)
-import qualified Data.Set as Set
-import Data.Text (Text)
-import qualified Data.Text as T
-import Data.Version (Version)
+import           Control.Monad.Reader
+import           Control.Monad.State
+import           Data.Bool
+import           Data.Foldable
+import           Data.List                        (intersperse)
+import           Data.Map.Strict                  (Map)
+import qualified Data.Map.Strict                  as Map
+import           Data.Maybe                       (fromMaybe)
+import           Data.Semigroup
+import           Data.Set                         (Set)
+import qualified Data.Set                         as Set
+import           Data.Text                        (Text)
+import qualified Data.Text                        as T
+import           Data.Version                     (Version)
 
-import Language.PureScript.AST.Literals
-import Language.PureScript.Comments
-import Language.PureScript.CoreFn
-import Language.PureScript.Names
-import Language.PureScript.PSString
+import           Language.PureScript.AST.Literals
+import           Language.PureScript.Comments
+import           Language.PureScript.CoreFn
+import           Language.PureScript.Names
+import           Language.PureScript.PSString
 
-import qualified Vimscript.AST as Vim
-import ZEncoding (zEncode)
+import qualified Vimscript.AST                    as Vim
+import           ZEncoding                        (zEncode)
 
-import Debug.Trace
+import           Debug.Trace
 
 modulePackName :: ModuleName -> Vim.PackName
 modulePackName (ModuleName ns) =
@@ -52,7 +52,7 @@ type Constructors
 type TopLevelDefinitions = Set (Qualified Ident)
 
 data GenState = GenState
-  { localNameN :: Int
+  { localNameN   :: Int
   , constructors :: Constructors
   , liftedBlocks :: [Vim.Block]
   }
@@ -61,7 +61,7 @@ type NameMappings = Map Ident Vim.ScopedName
 
 data GenEnv = GenEnv
   { currentModuleName :: ModuleName
-  , nameMappings :: NameMappings
+  , nameMappings      :: NameMappings
   , topLevelFunctions :: TopLevelDefinitions
   }
 
@@ -136,7 +136,7 @@ qualifiedName (ModuleName properNames) ident =
 psStringToText :: PSString -> Gen Text
 psStringToText str =
   case decodeString str of
-    Just t -> pure t
+    Just t  -> pure t
     Nothing -> error ("Invalid field name: " ++ show str)
 
 getConstructorFields ::
@@ -155,7 +155,7 @@ genLiteral ret =
     NumericLiteral (Right d) -> ret [] (Vim.floatingExpr d)
     StringLiteral s ->
       case decodeString s of
-        Just t -> ret [] (Vim.stringExpr t)
+        Just t  -> ret [] (Vim.stringExpr t)
         Nothing -> error ("Invalid string literal: " ++ show s)
     CharLiteral c -> ret [] (Vim.stringExpr (T.pack [c]))
     BooleanLiteral b -> ret [] (Vim.intExpr (bool 1 0 b))
@@ -175,8 +175,8 @@ genLiteral ret =
               pure (n, targetToBlock e, targetToExpression e)
 
 data CaseBranch = CaseBranch
-  { branchConditions :: [Vim.Expr]
-  , branchStmts :: Vim.Block
+  { branchConditions   :: [Vim.Expr]
+  , branchStmts        :: Vim.Block
   , branchNameMappings :: NameMappings
   } deriving (Show, Eq)
 
@@ -213,19 +213,22 @@ genGuardedBlock ret newMappings guardedExprs =
                  Nothing)
       pure (GenBlock (targetToBlock g <> [cond]))
 
-branchToBlock :: CaseBranch -> Target 'Statement -> Vim.Block
-branchToBlock CaseBranch {..} block =
-  case branchConditions of
-    [] -> branchStmts ++ targetToBlock block
-    (x:xs) ->
+branchesToCond :: [(CaseBranch, Target 'Statement)] -> Vim.Block
+branchesToCond =
+  \case
+    [] -> []
+    [pair] -> [Vim.Cond (Vim.CondStmt (branchToBlock pair) [] Nothing)]
+    (pair:pairs) ->
       [ Vim.Cond
-          (Vim.CondStmt
-             (Vim.CondCase
-                (foldl' Vim.andExpr x xs)
-                (branchStmts ++ targetToBlock block))
-             []
-             Nothing)
+          (Vim.CondStmt (branchToBlock pair) (map branchToBlock pairs) Nothing)
       ]
+  where
+    branchToBlock (CaseBranch {..}, block) =
+      (Vim.CondCase (cond branchConditions) (branchStmts ++ targetToBlock block))
+    cond =
+      \case
+        [] -> Vim.intExpr 1
+        (x:xs) -> foldl' Vim.andExpr x xs
 
 genCaseAlternatives ::
      TargetRet 'Statement
@@ -239,7 +242,7 @@ genCaseAlternatives ret exprs alts = do
       (genGuardedBlock ret)
       (map branchNameMappings branches)
       (map caseAlternativeResult alts)
-  pure (GenBlock (concat (zipWith branchToBlock branches guardedBlocks)))
+  pure (GenBlock (branchesToCond (zip branches guardedBlocks)))
 
 genAlt :: TargetRet t -> [Vim.Expr] -> CaseAlternative Ann -> Gen CaseBranch
 genAlt ret exprs alt =
@@ -264,7 +267,7 @@ genBinder :: TargetRet t -> Vim.Expr -> Binder Ann -> Gen CaseBranch
 genBinder ret expr =
   \case
     NullBinder _ -> pure mempty
-    LiteralBinder _ _lit -> pure mempty -- TODO: literal binder!
+    LiteralBinder _ lit -> genLiteralBinder expr lit
     VarBinder _ ident ->
       let sn = Vim.ScopedName Vim.Local (identToName ident)
       in pure
@@ -287,6 +290,16 @@ genBinder ret expr =
         { branchStmts = Vim.Let sn expr : branchStmts branch
         , branchNameMappings = Map.insert ident sn (branchNameMappings branch)
         }
+
+genLiteralBinder :: Vim.Expr -> Literal (Binder Ann) -> Gen CaseBranch
+genLiteralBinder expr =
+  \case
+    NumericLiteral (Left int) ->
+      pure mempty {branchConditions = [Vim.eqExpr expr (Vim.intExpr int)]}
+    NumericLiteral (Right double) ->
+      pure
+        mempty {branchConditions = [Vim.eqExpr expr (Vim.floatingExpr double)]}
+    _ -> pure mempty
 
 genFieldBinder ::
      TargetRet t -> Vim.Expr -> Ident -> Binder Ann -> Gen CaseBranch
@@ -436,7 +449,7 @@ singleTopLevelLet moduleName ident expr = do
   body <- genExpr (assignTarget name) expr
   case targetToBlock body of
     [letStmt] -> pure (Just [letStmt])
-    _ -> pure Nothing
+    _         -> pure Nothing
 
 wrapTopLevelLet :: ModuleName -> Ident -> Expr Ann -> Gen Vim.Block
 wrapTopLevelLet moduleName ident expr = do

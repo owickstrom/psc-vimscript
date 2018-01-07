@@ -77,6 +77,9 @@ data Projection
              Expr -- [expr1:expr2]
   deriving (Eq, Show, Data, Typeable)
 
+eqExpr :: Expr -> Expr -> Expr
+eqExpr = BinOpApply Equals
+
 andExpr :: Expr -> Expr -> Expr
 andExpr = BinOpApply And
 
