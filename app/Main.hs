@@ -1,3 +1,5 @@
+{-# LANGUAGE LambdaCase #-}
+
 module Main where
 
 import           Control.Monad
@@ -39,11 +41,18 @@ readForeignFile path = do
     then Just . T.pack <$> readFile path
     else pure Nothing
 
+readForeignFileFromPaths :: [FilePath] -> IO (Maybe T.Text)
+readForeignFileFromPaths [] = pure Nothing
+readForeignFileFromPaths (p:ps) =
+  readForeignFile p >>= \case
+    Just t -> pure (Just t)
+    Nothing -> readForeignFileFromPaths ps
+
 data InputModule = InputModule
-  { version      :: Version
-  , pursModule   :: Module Ann
-  , outPath      :: FilePath
-  , foreignsPath :: FilePath
+  { version       :: Version
+  , pursModule    :: Module Ann
+  , outPath       :: FilePath
+  , foreignsPaths :: [FilePath]
   }
 
 importedModuleNames :: InputModule -> Set ModuleName
@@ -58,8 +67,14 @@ loadModules = do
       InputModule
       { version = v
       , pursModule = m
-      , outPath = moduleOutPath ("vim-output" </> "autoload") (moduleName m)
-      , foreignsPath = moduleForeignsPath "test/purs-src" (moduleName m)
+      , outPath = moduleOutPath ("vim-output" </> "plugin") (moduleName m)
+      , foreignsPaths =
+          map
+            (`moduleForeignsPath` moduleName m)
+            [ "test/purs-src"
+            , "lib/purescript-eff/src"
+            , "lib/purescript-prelude/src"
+            ]
       }
 
 indexModules :: [InputModule] -> Map ModuleName (Module Ann)
@@ -71,9 +86,8 @@ main = do
   modules <- loadModules
   let modulesByName = indexModules modules
   forM_ modules $ \im -> do
-    let importedModules = modulesByName -- Map.restrictKeys modulesByName (importedModuleNames im)
-        prg = genModule importedModules (version im, pursModule im)
+    let prg = genModule modulesByName (version im, pursModule im)
         t = T.pack (pretty 200 (renderProgram prg))
-    foreigns <- fromMaybe mempty <$> readForeignFile (foreignsPath im)
+    foreigns <- fromMaybe mempty <$> readForeignFileFromPaths (foreignsPaths im)
     createDirectoryIfMissing True (takeDirectory (outPath im))
     T.writeFile (outPath im) (foreigns <> t)

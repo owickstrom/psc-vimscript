@@ -22,7 +22,10 @@ import qualified Data.HashMap.Strict                 as HashMap
 import           Data.List                           (intersperse)
 import           Data.Map.Strict                     (Map)
 import qualified Data.Map.Strict                     as Map
+import           Data.Maybe                          (fromMaybe)
 import           Data.Semigroup
+import           Data.Set                            (Set)
+import qualified Data.Set                            as Set
 import           Data.Text                           (Text)
 import qualified Data.Text                           as T
 import           Data.Version                        (Version)
@@ -46,18 +49,30 @@ loadModule path = do
         Error e   -> fail e
     Nothing -> fail "Couldn't read CoreFn file."
 
-type NameMappings = HashMap Vim.Name Vim.ScopedName
-
-type Gen a = StateT GenState (Reader NameMappings) a
+type Gen a = StateT GenState (Reader GenEnv) a
 
 type Constructors
    = Map ( Qualified (ProperName 'TypeName)
          , Qualified (ProperName 'ConstructorName)) [Ident]
 
+type TopLevelDefinitions = Set (Qualified Ident)
+
 data GenState = GenState
   { localNameN   :: Int
   , constructors :: Constructors
-  } deriving (Show, Eq)
+  , topLevelDefs :: TopLevelDefinitions
+  }
+
+type NameMappings = HashMap Vim.Name Vim.ScopedName
+
+data GenEnv = GenEnv
+  { currentModuleName :: ModuleName
+  , nameMappings      :: NameMappings
+  }
+
+withNewMappings :: NameMappings -> Gen a -> Gen a
+withNewMappings newMappings =
+  local (\e -> e {nameMappings = HashMap.union (nameMappings e) newMappings})
 
 fresh :: Gen Vim.Name
 fresh = do
@@ -116,15 +131,9 @@ targetToExpression (GenExpression _ expr) = expr
 identToName :: Ident -> Vim.Name
 identToName = Vim.Name . runIdent
 
-genName :: Qualified Ident -> Gen Vim.ScopedName
-genName (Qualified Nothing ident) = do
-  mappings <- ask
-  case HashMap.lookup (identToName ident) mappings of
-    Just sn -> pure sn
-    Nothing -> error ("Unknown name: " <> show (identToName ident)) -- pure (Vim.ScopedName Vim.Global (identToName ident))
-genName (Qualified (Just (ModuleName properNames)) ident) =
-  pure
-    (Vim.ScopedName Vim.Global (Vim.Name (moduleName <> "#" <> runIdent ident)))
+qualifiedName :: ModuleName -> Ident -> Vim.ScopedName
+qualifiedName (ModuleName properNames) ident =
+  Vim.ScopedName Vim.Global (Vim.Name (moduleName <> "#" <> runIdent ident))
   where
     moduleName :: Text
     moduleName = mconcat (intersperse "#" (map runProperName properNames))
@@ -189,8 +198,8 @@ genGuardedBlock ::
   -> NameMappings
   -> Either [(Guard Ann, Expr Ann)] (Expr Ann)
   -> Gen (Target 'Statement)
-genGuardedBlock ret nameMappings guardedExprs =
-  local (HashMap.union nameMappings) $
+genGuardedBlock ret newMappings guardedExprs =
+  withNewMappings newMappings $
   case guardedExprs of
     Left exprs -> do
       bs <- mapM guardBlock exprs
@@ -330,24 +339,33 @@ genExpr ret =
                       (targetToExpression e)
               pure (GenBlock (targetToBlock e <> [assign]))
     Abs _ arg expr -> do
-        let argName = identToName arg
-        closureName <- Vim.ScopedName Vim.Unscoped <$> fresh
-        body <-
-          local
-            (HashMap.insert argName (Vim.ScopedName Vim.Argument argName))
-            (genExpr returnTarget expr)
-        ret
-          [Vim.Function closureName [argName] Vim.Closure (targetToBlock body)]
-          (Vim.FuncRef closureName)
+      let argName = identToName arg
+      closureName <- Vim.ScopedName Vim.Unscoped <$> fresh
+      body <-
+        withNewMappings
+          (HashMap.singleton argName (Vim.ScopedName Vim.Argument argName))
+          (genExpr returnTarget expr)
+      ret
+        [Vim.Function closureName [argName] Vim.Closure (targetToBlock body)]
+        (Vim.FuncRef closureName)
     App _ f p -> do
       f' <- genExpr expressionTarget f
       p' <- genExpr expressionTarget p
       ret
         (targetToBlock f' <> targetToBlock p')
         (Vim.Apply (targetToExpression f') [targetToExpression p'])
-    Var _ qn -> do
-      n <- genName qn
-      ret [] (Vim.Ref n)
+    Var _ (Qualified Nothing ident) -> do
+      mappings <- asks nameMappings
+      let name = identToName ident
+      case HashMap.lookup name mappings of
+        Just sn -> ret [] (Vim.Ref sn)
+        Nothing -> ret [] (Vim.Ref (Vim.ScopedName Vim.Script name))
+    Var _ (Qualified (Just mn) ident)
+      | mn == moduleNameFromString "Prim" ->
+        ret [] (Vim.Ref (qualifiedName mn ident))
+      | otherwise -> do
+      let sn = qualifiedName mn ident
+      ret [] (Vim.Ref sn)
     Case _ exprs alts -> do
       n <- freshLocal
       es <- mapM (genExpr expressionTarget) exprs
@@ -357,7 +375,7 @@ genExpr ret =
     Let _ bindings expr -> do
       binds <- mapM genBind bindings
       let mappings = foldMap fst binds
-      e <- local (HashMap.union mappings) (genExpr expressionTarget expr)
+      e <- withNewMappings mappings (genExpr expressionTarget expr)
       ret
         (foldMap (targetToBlock . snd) binds <> targetToBlock e)
         (targetToExpression e)
@@ -367,16 +385,7 @@ genBind =
   \case
     NonRec ann ident expr -> genBind' ann ident expr
     Rec binds -> do
-      let nameMappings =
-            HashMap.fromList
-              [ ( identToName ident
-                , Vim.ScopedName Vim.Local (identToName ident))
-              | ((_, ident), _) <- binds
-              ]
-      bs <-
-        local
-          (HashMap.union nameMappings)
-          (mapM (\((ann, ident), expr) -> genBind' ann ident expr) binds)
+      bs <- mapM (\((ann, ident), expr) -> genBind' ann ident expr) binds
       pure (foldMap fst bs, GenBlock (foldMap (targetToBlock . snd) bs))
   where
     genBind' _ ident expr = do
@@ -391,28 +400,41 @@ genComment =
     LineComment t -> pure [Vim.LineComment t]
     BlockComment t -> pure (map Vim.LineComment (T.lines t))
 
+singleTopLevelLet :: ModuleName -> Ident -> Expr Ann -> Gen (Maybe Vim.Block)
+singleTopLevelLet moduleName ident expr = do
+  let name = qualifiedName moduleName ident
+  body <- genExpr (assignTarget name) expr
+  case targetToBlock body of
+    [letStmt] -> pure (Just [letStmt])
+    _         -> pure Nothing
+
+wrapTopLevelLet :: ModuleName -> Ident -> Expr Ann -> Gen Vim.Block
+wrapTopLevelLet moduleName ident expr = do
+  fName <- Vim.ScopedName Vim.Script <$> fresh
+  body <- genExpr returnTarget expr
+  let f = Vim.Function fName [] Vim.Regular (targetToBlock body)
+      name = qualifiedName moduleName ident
+      invocation = Vim.Let name (Vim.Apply (Vim.Ref fName) [])
+  pure [f, invocation]
+
 genDecl :: ModuleName -> Bind Ann -> Gen Vim.Block
 genDecl moduleName =
   \case
     NonRec ann ident expr -> genDecl' ann ident expr
     Rec binds ->
       concat <$> mapM (\((ann, ident), expr) -> genDecl' ann ident expr) binds
+    {-genDecl' _ ident (Abs _ arg expr) = do-}
+      {-let name = qualifiedName moduleName ident-}
+      {-let argName = identToName arg-}
+      {-body <--}
+        {-withNewMappings-}
+          {-(HashMap.singleton argName (Vim.ScopedName Vim.Argument argName))-}
+          {-(genExpr returnTarget expr)-}
+      {-pure [Vim.Function name [argName] Vim.Regular (targetToBlock body)]-}
   where
-    genDecl' _ ident (Abs _ arg expr) = do
-      name <- genName (Qualified (Just moduleName) ident)
-      let argName = identToName arg
-      body <-
-        local
-          (HashMap.insert argName (Vim.ScopedName Vim.Argument argName))
-          (genExpr returnTarget expr)
-      pure [Vim.Function name [argName] Vim.Regular (targetToBlock body)]
-    genDecl' _ ident expr = do
-      fName <- Vim.ScopedName Vim.Script <$> fresh
-      body <- genExpr returnTarget expr
-      let f = Vim.Function fName [] Vim.Regular (targetToBlock body)
-      name <- genName (Qualified (Just moduleName) ident)
-      let invocation = Vim.Let name (Vim.Apply (Vim.Ref fName) [])
-      pure [f, invocation]
+    genDecl' _ ident expr =
+      fromMaybe <$> wrapTopLevelLet moduleName ident expr <*>
+      singleTopLevelLet moduleName ident expr
 
 extractConstructors :: ModuleName -> Bind a -> Constructors
 extractConstructors mn = getConstructors
@@ -430,17 +452,28 @@ extractConstructors mn = getConstructors
         (const mempty)
         (const mempty)
 
+extractTopLevelDefs :: ModuleName -> Module Ann -> TopLevelDefinitions
+extractTopLevelDefs mn m =
+  Set.fromList (map (Qualified (Just mn)) (moduleExports m))
+
 genModule :: Map ModuleName (Module Ann) -> (Version, Module Ann) -> Vim.Program
-genModule importedModules (_version, m) =
-  runReader (evalStateT gen initialState) mempty
+genModule allModules (_version, m) =
+  runReader (evalStateT gen initialState) initialEnv
   where
     moduleCtors = foldMap (extractConstructors (moduleName m)) (moduleDecls m)
     importedCtors =
       foldMap
         (\im -> foldMap (extractConstructors (moduleName im)) (moduleDecls im))
-        importedModules
+        allModules
     initialState =
-      GenState {localNameN = 0, constructors = moduleCtors <> importedCtors}
+      GenState
+      { localNameN = 0
+      , constructors = moduleCtors <> importedCtors
+      , topLevelDefs =
+          foldMap (uncurry extractTopLevelDefs) (Map.toList allModules)
+      }
+    initialEnv =
+      GenEnv {nameMappings = mempty, currentModuleName = moduleName m}
     gen = do
       comments <- mapM genComment (moduleComments m)
       stmts <- mapM (genDecl (moduleName m)) (moduleDecls m)
