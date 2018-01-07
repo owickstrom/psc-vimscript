@@ -1,9 +1,4 @@
-function! g:Main#echo(x)
-  function! Echo() closure
-    echo(a:x)
-  endfunction
-  return funcref('Echo')
+function! s:echo_impl(x)
+  echo a:x
 endfunction
-function! g:Main#addInt(x)
-  return {y -> a:x + y}
-endfunction
+let g:Main#echo = {x -> {-> (s:echo_impl(x))}}

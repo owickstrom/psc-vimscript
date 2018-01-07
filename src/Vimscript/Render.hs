@@ -137,5 +137,16 @@ renderStmt =
 renderBlock :: Block -> Doc
 renderBlock = stack . map renderStmt
 
-renderProgram :: Program -> Doc
-renderProgram (Program stmts) = stack (map renderStmt stmts)
+packLoadedGuard :: Doc
+packLoadedGuard =
+  "if exists('s:purs__loaded')" </> indent indentWidth "finish" </> "endif" </>
+  "let s:purs__loaded=1"
+
+renderImport :: PackName -> Doc
+renderImport (PackName name) = "packadd" <+> strictText name
+
+renderProgram :: Text -> Program -> Doc
+renderProgram prelude (Program imports stmts) =
+  stack
+    ([packLoadedGuard] <> map renderImport imports <> [strictText prelude] <>
+     map renderStmt stmts)

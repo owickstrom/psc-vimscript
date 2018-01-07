@@ -1,4 +1,5 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Main where
 
@@ -7,11 +8,9 @@ import           Data.Foldable
 import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as Map
 import           Data.Maybe
-import           Data.Semigroup
 import           Data.Set                   (Set)
 import qualified Data.Set                   as Set
 import qualified Data.Text                  as T
-import qualified Data.Text.IO               as T
 import           Data.Version               (Version)
 import           Language.PureScript.CoreFn
 import           Language.PureScript.Names
@@ -20,13 +19,16 @@ import           System.Directory
 import           System.Environment
 import           System.FilePath
 import           Text.PrettyPrint.Mainland  (pretty)
+import qualified Vimscript.AST              as Vim
 import           Vimscript.Render
 
 moduleOutPath :: FilePath -> ModuleName -> FilePath
-moduleOutPath outDir (ModuleName properNames) =
-  foldl' go outDir properNames ++ ".vim"
+moduleOutPath outDir mn@(ModuleName properNames) =
+  outDir </> "pack/purs/opt" </> T.unpack pn </> "plugin" </> pluginFilePath
   where
-    go path n = path </> T.unpack (runProperName n)
+    (Vim.PackName pn) = modulePackName mn
+    pluginFilePath = foldl' addProperName outDir properNames ++ ".vim"
+    addProperName path n = path </> T.unpack (runProperName n)
 
 moduleForeignsPath :: FilePath -> ModuleName -> FilePath
 moduleForeignsPath srcDir (ModuleName properNames) =
@@ -67,7 +69,7 @@ loadModules = do
       InputModule
       { version = v
       , pursModule = m
-      , outPath = moduleOutPath ("vim-output" </> "plugin") (moduleName m)
+      , outPath = moduleOutPath "vim-output" (moduleName m)
       , foreignsPaths =
           map
             (`moduleForeignsPath` moduleName m)
@@ -87,7 +89,7 @@ main = do
   let modulesByName = indexModules modules
   forM_ modules $ \im -> do
     let prg = genModule modulesByName (version im, pursModule im)
-        t = T.pack (pretty 200 (renderProgram prg))
     foreigns <- fromMaybe mempty <$> readForeignFileFromPaths (foreignsPaths im)
+    let t = pretty 200 (renderProgram foreigns prg)
     createDirectoryIfMissing True (takeDirectory (outPath im))
-    T.writeFile (outPath im) (foreigns <> t)
+    writeFile (outPath im) t

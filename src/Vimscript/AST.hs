@@ -169,6 +169,9 @@ pattern ScopedLet :: NameScope -> Name -> Expr -> Stmt
 
 pattern ScopedLet s n e = Let (ScopedName s n) e
 
-newtype Program =
-  Program [Stmt]
+newtype PackName = PackName Text
+  deriving (Eq, Show, Data, Typeable)
+
+data Program =
+  Program { programImports :: [PackName], programStmts :: [Stmt]}
   deriving (Eq, Show, Data, Typeable)

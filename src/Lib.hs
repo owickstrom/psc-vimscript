@@ -7,6 +7,7 @@
 
 module Lib
   ( loadModule
+  , modulePackName
   , genModule
   ) where
 
@@ -48,6 +49,13 @@ loadModule path = do
         Success m -> return m
         Error e   -> fail e
     Nothing -> fail "Couldn't read CoreFn file."
+
+modulePackName :: ModuleName -> Vim.PackName
+modulePackName (ModuleName ns) =
+  Vim.PackName (T.intercalate "." (map runProperName ns))
+
+primModule :: ModuleName
+primModule = moduleNameFromString "Prim"
 
 type Gen a = StateT GenState (Reader GenEnv) a
 
@@ -361,11 +369,10 @@ genExpr ret =
         Just sn -> ret [] (Vim.Ref sn)
         Nothing -> ret [] (Vim.Ref (Vim.ScopedName Vim.Script name))
     Var _ (Qualified (Just mn) ident)
-      | mn == moduleNameFromString "Prim" ->
-        ret [] (Vim.Ref (qualifiedName mn ident))
+      | mn == primModule -> ret [] (Vim.Ref (qualifiedName mn ident))
       | otherwise -> do
-      let sn = qualifiedName mn ident
-      ret [] (Vim.Ref sn)
+        let sn = qualifiedName mn ident
+        ret [] (Vim.Ref sn)
     Case _ exprs alts -> do
       n <- freshLocal
       es <- mapM (genExpr expressionTarget) exprs
@@ -465,6 +472,11 @@ genModule allModules (_version, m) =
       foldMap
         (\im -> foldMap (extractConstructors (moduleName im)) (moduleDecls im))
         allModules
+    imports =
+      [ modulePackName n
+      | (_, n) <- moduleImports m
+      , n /= primModule && n /= moduleName m
+      ]
     initialState =
       GenState
       { localNameN = 0
@@ -477,4 +489,8 @@ genModule allModules (_version, m) =
     gen = do
       comments <- mapM genComment (moduleComments m)
       stmts <- mapM (genDecl (moduleName m)) (moduleDecls m)
-      pure (Vim.Program (concat comments ++ concat stmts))
+      pure
+        Vim.Program
+        { programImports = imports
+        , programStmts = concat comments ++ concat stmts
+        }

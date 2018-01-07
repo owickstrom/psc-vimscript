@@ -1,2 +1,3 @@
-set runtimepath+=/home/owi/projects/haskell/psc-vimscript/vim-output
 source ~/.vimrc
+set packpath+=/home/owi/projects/haskell/psc-vimscript/vim-output
+packadd Main

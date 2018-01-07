@@ -1,4 +1,4 @@
-function s:unsafeCompareImpl(lt, eq, gt, x, y)
+function! s:unsafeCompareImpl(lt, eq, gt, x, y)
   if a:x < a:y
     return a:lt
   elseif a:x ==# a:y
