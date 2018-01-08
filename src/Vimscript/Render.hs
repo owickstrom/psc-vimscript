@@ -39,7 +39,7 @@ renderBinOp =
     Subtract -> "-"
     Multiply -> "*"
     Divide -> "/"
-    Equals -> "=="
+    Equals -> "==#"
     LT -> "<"
     LTE -> "<="
     GT -> ">"

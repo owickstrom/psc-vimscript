@@ -8,4 +8,4 @@ function! s:unsafeCompareImpl(lt, eq, gt, x, y)
   endif
 endfunction
 
-let g:Data#Ord#Unsafe#unsafeCompareImpl = { lt -> { eq -> { gt -> { x -> { y -> unsafeCompareImpl(lt, eq, gt, x, y)}}}}}
+let g:Data#Ord#Unsafe#unsafeCompareImpl = { lt -> { eq -> { gt -> { x -> { y -> s:unsafeCompareImpl(lt, eq, gt, x, y)}}}}}

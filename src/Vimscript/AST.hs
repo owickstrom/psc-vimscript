@@ -101,6 +101,12 @@ data Expr
   | Exists ScopedName
   deriving (Eq, Show, Data, Typeable)
 
+true :: Expr
+true = intExpr 1
+
+false :: Expr
+false = intExpr 0
+
 intExpr :: Integer -> Expr
 intExpr = Prim . Integer
 
