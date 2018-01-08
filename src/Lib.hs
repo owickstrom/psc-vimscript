@@ -1,10 +1,7 @@
 {-# LANGUAGE DataKinds          #-}
-{-# LANGUAGE GADTs              #-}
-{-# LANGUAGE KindSignatures     #-}
 {-# LANGUAGE LambdaCase         #-}
 {-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE RecordWildCards    #-}
-{-# LANGUAGE StandaloneDeriving #-}
 
 module Lib
   ( modulePackName
@@ -155,6 +152,20 @@ getConstructorFields tn cn =
     Just fields -> pure fields
     Nothing -> error ("Unknown constructor: " ++ show (tn, cn))
 
+genSimpleExpr :: Expr Ann -> Gen (Vim.Block, Vim.Expr)
+genSimpleExpr expr = do
+  n <- freshLocal
+  t <- genExpr (letTarget n) expr
+  case targetToBlock t of
+    [Vim.Let ln e]
+      | ln == n -> pure ([], e)
+    block -> pure (block, Vim.Ref n)
+
+genSimpleExprs :: [Expr Ann] -> Gen (Vim.Block, [Vim.Expr])
+genSimpleExprs exprs = do
+  es <- mapM genSimpleExpr exprs
+  pure (concatMap fst es, map snd es)
+
 genLiteral :: TargetRet -> Literal (Expr Ann) -> Gen Target
 genLiteral ret =
   \case
@@ -167,19 +178,12 @@ genLiteral ret =
     CharLiteral c -> ret [] (Vim.stringExpr (T.pack [c]))
     BooleanLiteral b -> ret [] (Vim.intExpr (bool 1 0 b))
     ArrayLiteral exprs -> do
-      ns <- mapM (const freshLocal) exprs
-      targets <- zipWithM genExpr (map letTarget ns) exprs
-      ret (concatMap targetToBlock targets) (Vim.listExpr (map Vim.Ref ns))
+      (block, exprs') <- genSimpleExprs exprs
+      ret block (Vim.listExpr exprs')
     ObjectLiteral pairs -> do
-      ns <- mapM (const freshLocal) pairs
-      fs <- zipWithM genField ns pairs
-      ret
-        (concat [b | (_, b, _) <- fs])
-        (Vim.dictionaryExpr [(n, e) | (n, _, e) <- fs])
-      where genField ln (field, expr) = do
-              n <- Vim.Name <$> psStringToText field
-              e <- genExpr (letTarget ln) expr
-              pure (n, targetToBlock e, Vim.Ref ln)
+      (block, exprs) <- genSimpleExprs (map snd pairs)
+      fs <- mapM (fmap Vim.Name . psStringToText . fst) pairs
+      ret block (Vim.dictionaryExpr (zip fs exprs))
 
 data CaseBranch = CaseBranch
   { branchConditions   :: [Vim.Expr]
@@ -210,16 +214,12 @@ genGuardedBlock ret newMappings guardedExprs =
   where
     guardBlock :: (Guard Ann, Expr Ann) -> Gen Target
     guardBlock (guard', expr) = do
-      gn <- freshLocal
-      g <- genExpr (letTarget gn) guard'
+      (gb, ge) <- genSimpleExpr guard'
       e <- genExpr ret expr
       let cond =
             Vim.Cond
-              (Vim.CondStmt
-                 (Vim.CondCase (Vim.Ref gn) (targetToBlock e))
-                 []
-                 Nothing)
-      pure (GenBlock (targetToBlock g <> [cond]))
+              (Vim.CondStmt (Vim.CondCase ge (targetToBlock e)) [] Nothing)
+      pure (GenBlock (gb <> [cond]))
 
 branchToBlock :: CaseBranch -> Target -> [Vim.Stmt]
 branchToBlock CaseBranch {..} block =
@@ -419,13 +419,9 @@ genExpr ret =
             mapM lookupIdent freeVars
           ret [] (Vim.Lambda [origArg] (Vim.Apply (Vim.Ref liftedName) params))
     App _ f p -> do
-      fn <- freshLocal
-      pn <- freshLocal
-      f' <- genExpr (letTarget fn) f
-      p' <- genExpr (letTarget pn) p
-      ret
-        (targetToBlock f' <> targetToBlock p')
-        (Vim.Apply (Vim.Ref fn) [Vim.Ref pn])
+      (fb, fe) <- genSimpleExpr f
+      (pb, pe) <- genSimpleExpr p
+      ret (fb <> pb) (Vim.Apply fe [pe])
     Var _ (Qualified Nothing ident) -> lookupIdent ident >>= ret []
     Var _ qn@(Qualified (Just mn) ident)
       | mn == primModule -> ret [] (Vim.Ref (qualifiedName mn ident))
@@ -436,10 +432,9 @@ genExpr ret =
           then ret [] (Vim.FuncRef sn)
           else ret [] (Vim.Ref sn)
     Case _ exprs alts -> do
-      ns <- mapM (const freshLocal) exprs
-      es <- zipWithM genExpr (map letTarget ns) exprs
-      cases <- genCaseAlternatives ret (map Vim.Ref ns) alts
-      pure (GenBlock (concatMap targetToBlock es <> targetToBlock cases))
+      (eb, es) <- genSimpleExprs exprs
+      cases <- genCaseAlternatives ret es alts
+      pure (GenBlock (eb <> targetToBlock cases))
     Let _ bindings expr -> do
       binds <- mapM genBind bindings
       let mappings = foldMap fst binds
