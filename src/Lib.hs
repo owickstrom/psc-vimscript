@@ -93,8 +93,6 @@ data Target
   | GenCopy Vim.ScopedName
             Vim.Block
             Vim.Expr
-  | GenExpression Vim.Block
-                  Vim.Expr
   deriving (Show)
 
 returnTarget :: Vim.Block -> Vim.Expr -> Gen Target
@@ -127,7 +125,6 @@ targetToBlock =
           name
           (Vim.Apply (Vim.Ref (Vim.ScopedName Vim.BuiltIn "deepcopy")) [expr])
       ]
-    GenExpression block _ -> block
 
 textToName :: Text -> Vim.Name
 textToName = Vim.Name . uppercaseFirst . zEncode
@@ -401,9 +398,9 @@ genExpr ret =
       where updateField objName (field, newValue) = do
               f <- psStringToText field
               let assign =
-                    (Vim.AssignProj
-                       (Vim.AssignName objName)
-                       (Vim.ProjSingle (Vim.stringExpr f)))
+                    Vim.AssignProj
+                      (Vim.AssignName objName)
+                      (Vim.ProjSingle (Vim.stringExpr f))
               genExpr (assignTarget assign) newValue
     Abs _ arg expr -> do
       localVariables <- asks (Map.keysSet . nameMappings)
@@ -596,8 +593,7 @@ removeUnusedLambdaArg =
 
 -- TODO: Use this when it doesn't break Eff bind.
 removeUnused :: Vim.Program -> Vim.Program
-removeUnused =
-  id
+removeUnused = id
   -- removeUndefinedApp . removeUnusedLambdaArg . removeUnusedFunctionArg
 
 genModule ::
