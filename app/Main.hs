@@ -87,7 +87,15 @@ loadModules = do
           map
             (`moduleForeignsPath` moduleName m)
             [ "test/purs-src"
+            , "lib/purescript-bifunctors/src"
             , "lib/purescript-eff/src"
+            , "lib/purescript-foldable-traversable/src"
+            , "lib/purescript-maybe/src"
+            , "lib/purescript-newtype/src"
+            , "lib/purescript-control/src"
+            , "lib/purescript-either/src"
+            , "lib/purescript-invariant/src"
+            , "lib/purescript-monoid/src"
             , "lib/purescript-prelude/src"
             ]
       }

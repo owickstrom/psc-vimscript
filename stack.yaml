@@ -15,7 +15,7 @@
 # resolver:
 #  name: custom-snapshot
 #  location: "./custom-snapshot.yaml"
-resolver: nightly-2017-11-20
+resolver: lts-10.0
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.
@@ -47,6 +47,7 @@ extra-deps:
 - pipes-http-1.0.5
 - Win32-notify-0.3.0.3
 - Glob-0.9.1
+- ansi-terminal-0.6.3.1
 # Override default flag values for local packages and extra-deps
 flags: {}
 

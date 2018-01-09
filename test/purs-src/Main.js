@@ -1,5 +1,3 @@
-exports.echo = function (x) {
-  return function () {
-    console.log(x);
-  };
-}
+exports.echo = undefined;
+exports.input = undefined;
+exports.confirm = undefined;

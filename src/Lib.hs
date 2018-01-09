@@ -1,7 +1,7 @@
-{-# LANGUAGE DataKinds          #-}
-{-# LANGUAGE LambdaCase         #-}
-{-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE DataKinds         #-}
+{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 
 module Lib
   ( modulePackName
@@ -11,7 +11,9 @@ module Lib
 import           Control.Monad.Reader
 import           Control.Monad.State
 import           Data.Bool
+import qualified Data.Char                        as Char
 import           Data.Foldable
+import           Data.Generics.Uniplate.Data
 import           Data.List                        (intersperse)
 import           Data.Map.Strict                  (Map)
 import qualified Data.Map.Strict                  as Map
@@ -22,9 +24,11 @@ import qualified Data.Set                         as Set
 import           Data.Text                        (Text)
 import qualified Data.Text                        as T
 import           Data.Version                     (Version)
+import           GHC.Generics                     ()
 
 import           Language.PureScript.AST.Literals
 import           Language.PureScript.Comments
+import qualified Language.PureScript.Constants    as PureScript
 import           Language.PureScript.CoreFn
 import           Language.PureScript.Names
 import           Language.PureScript.PSString
@@ -125,8 +129,19 @@ targetToBlock =
       ]
     GenExpression block _ -> block
 
+textToName :: Text -> Vim.Name
+textToName = Vim.Name . uppercaseFirst . zEncode
+  where
+    uppercaseFirst t =
+      case T.uncons t of
+        Just (c, t') -> T.cons (Char.toUpper c) t'
+        Nothing      -> T.empty
+
 identToName :: Ident -> Vim.Name
-identToName = Vim.Name . zEncode . runIdent
+identToName = textToName . runIdent
+
+unscopedName :: Ident -> Vim.ScopedName
+unscopedName = Vim.ScopedName Vim.Unscoped . identToName
 
 qualifiedName :: ModuleName -> Ident -> Vim.ScopedName
 qualifiedName (ModuleName properNames) ident =
@@ -361,7 +376,7 @@ lookupIdent ident = do
 liftBlock :: Vim.Block -> Gen ()
 liftBlock block = modify (\s -> s {liftedBlocks = liftedBlocks s <> [block]})
 
-genExpr :: TargetRet -> Expr Ann -> Gen (Target)
+genExpr :: TargetRet -> Expr Ann -> Gen Target
 genExpr ret =
   \case
     Literal _ lit -> genLiteral ret lit
@@ -423,8 +438,10 @@ genExpr ret =
       (pb, pe) <- genSimpleExpr p
       ret (fb <> pb) (Vim.Apply fe [pe])
     Var _ (Qualified Nothing ident) -> lookupIdent ident >>= ret []
+    Var _ (Qualified (Just mn) (Ident "undefined"))
+      | mn == primModule -> ret [] (Vim.intExpr 0)
     Var _ qn@(Qualified (Just mn) ident)
-      | mn == primModule -> ret [] (Vim.Ref (qualifiedName mn ident))
+      | mn == primModule -> ret [] (Vim.Ref (unscopedName ident))
       | otherwise -> do
         let sn = qualifiedName mn ident
         fns <- asks topLevelFunctions
@@ -550,13 +567,46 @@ extractLifted gen = do
 genDeclAndLifted :: ModuleName -> Bind Ann -> Gen Vim.Block
 genDeclAndLifted moduleName = extractLifted . genDecl moduleName
 
+removeUndefinedApp :: Vim.Program -> Vim.Program
+removeUndefinedApp =
+  transformBi $ \case
+    (Vim.Apply fn ps) -> Vim.Apply fn (filter notUndefined ps)
+    other -> other
+  where
+    notUndefined (Vim.Ref param) =
+      param /= Vim.ScopedName Vim.Unscoped (textToName PureScript.undefined) &&
+      param /= Vim.ScopedName Vim.Unscoped (textToName PureScript.__unused)
+    notUndefined _ = True
+
+removeUnusedFunctionArg :: Vim.Program -> Vim.Program
+removeUnusedFunctionArg =
+  transformBi $ \case
+    Vim.Function name args Vim.Regular body ->
+      Vim.Function name (filter notUnused args) Vim.Regular body
+    other -> other
+  where
+    notUnused arg = arg /= textToName PureScript.__unused
+
+removeUnusedLambdaArg :: Vim.Program -> Vim.Program
+removeUnusedLambdaArg =
+  transformBi $ \case
+    (Vim.Lambda [arg] body)
+      | arg == textToName PureScript.__unused -> Vim.Lambda [] body
+    other -> other
+
+-- TODO: Use this when it doesn't break Eff bind.
+removeUnused :: Vim.Program -> Vim.Program
+removeUnused =
+  id
+  -- removeUndefinedApp . removeUnusedLambdaArg . removeUnusedFunctionArg
+
 genModule ::
      Map ModuleName (Module Ann)
   -> Maybe Text
   -> (Version, Module Ann)
   -> Vim.Program
 genModule allModules prelude (_version, m) =
-  fst (runGen initialEnv initialState gen)
+  removeUnused (fst (runGen initialEnv initialState gen))
   where
     moduleCtors = foldMap (extractConstructors (moduleName m)) (moduleDecls m)
     importedCtors =
@@ -584,8 +634,7 @@ genModule allModules prelude (_version, m) =
       }
     gen = do
       comments <- mapM genComment (moduleComments m)
-      stmts <-
-        (concat <$> mapM (genDeclAndLifted (moduleName m)) (moduleDecls m))
+      stmts <- concat <$> mapM (genDeclAndLifted (moduleName m)) (moduleDecls m)
       pure
         Vim.Program
         { programStmts =
