@@ -1,2 +1,0 @@
-E121: Undefined variable: g:Control#Apply#arrayApply
-E121: Undefined variable: g:Data#Functor#arrayMap
