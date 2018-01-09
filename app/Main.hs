@@ -43,11 +43,9 @@ moduleOutPath outDir mn@(ModuleName properNames) =
     pluginFilePath = foldl' addProperName outDir properNames ++ ".vim"
     addProperName path n = path </> T.unpack (runProperName n)
 
-moduleForeignsPath :: FilePath -> ModuleName -> FilePath
-moduleForeignsPath srcDir (ModuleName properNames) =
-  foldl' go srcDir properNames ++ ".vim"
-  where
-    go path n = path </> T.unpack (runProperName n)
+moduleForeignsPath :: FilePath -> FilePath
+moduleForeignsPath mPath =
+  replaceExtension mPath ".vim"
 
 readForeignFile :: FilePath -> IO (Maybe T.Text)
 readForeignFile path = do
@@ -56,18 +54,11 @@ readForeignFile path = do
     then Just . T.pack <$> readFile path
     else pure Nothing
 
-readForeignFileFromPaths :: [FilePath] -> IO (Maybe T.Text)
-readForeignFileFromPaths [] = pure Nothing
-readForeignFileFromPaths (p:ps) =
-  readForeignFile p >>= \case
-    Just t -> pure (Just t)
-    Nothing -> readForeignFileFromPaths ps
-
 data InputModule = InputModule
   { version       :: Version
   , pursModule    :: Module Ann
   , outPath       :: FilePath
-  , foreignsPaths :: [FilePath]
+  , foreignsPath  :: FilePath
   }
 
 importedModuleNames :: InputModule -> Set ModuleName
@@ -83,21 +74,7 @@ loadModules = do
       { version = v
       , pursModule = m
       , outPath = moduleOutPath "vim-output" (moduleName m)
-      , foreignsPaths =
-          map
-            (`moduleForeignsPath` moduleName m)
-            [ "test/purs-src"
-            , "lib/purescript-bifunctors/src"
-            , "lib/purescript-eff/src"
-            , "lib/purescript-foldable-traversable/src"
-            , "lib/purescript-maybe/src"
-            , "lib/purescript-newtype/src"
-            , "lib/purescript-control/src"
-            , "lib/purescript-either/src"
-            , "lib/purescript-invariant/src"
-            , "lib/purescript-monoid/src"
-            , "lib/purescript-prelude/src"
-            ]
+      , foreignsPath = moduleForeignsPath (modulePath m)
       }
 
 indexModules :: [InputModule] -> Map ModuleName (Module Ann)
@@ -109,7 +86,7 @@ main = do
   modules <- loadModules
   let modulesByName = indexModules modules
   forM_ modules $ \im -> do
-    foreigns <- readForeignFileFromPaths (foreignsPaths im)
+    foreigns <- readForeignFile (foreignsPath im)
     let prg = genModule modulesByName foreigns (version im, pursModule im)
         t = pretty 200 (renderProgram prg)
     createDirectoryIfMissing True (takeDirectory (outPath im))
