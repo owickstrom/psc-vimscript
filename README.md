@@ -2,7 +2,7 @@
 
 *This is an experimental project, and a work in progress.*
 
-**PLEASE, LOOK AWAY FOR NOW!**
+![This is not the PureScript backend you're looking for.](https://imgflip.com/i/22dbbm)
 
 ## Build
 
